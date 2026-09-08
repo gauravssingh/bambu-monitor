@@ -1,0 +1,37 @@
+application:
+  name: bambu-monitor
+  environment: development
+  log_level: INFO
+
+database:
+  path: ./data/bambu.db
+  journal_mode: WAL
+  synchronous: NORMAL
+  flush_interval_seconds: 5.0
+
+printers:
+  - id: bambu-a1
+    model: A1
+    host: ${BAMBU_HOST:127.0.0.1}
+    serial_number: ${BAMBU_SERIAL:01P00A123456789}
+    access_code: "${BAMBU_ACCESS_CODE:}"
+    username: bblp
+    port: 8883
+    tls: true
+    tls_verify: false
+
+events:
+  delivery:
+    enabled: true
+    endpoint: ${EVENT_ENDPOINT:http://localhost:8080/events}
+    timeout_seconds: 10
+    retry_attempts: 5
+    initial_backoff_seconds: 2.0
+    backoff_multiplier: 2.0
+    max_backoff_seconds: 300.0
+
+detection:
+  stall:
+    enabled: true
+    min_check_seconds: 300.0
+    adaptive_factor: 1.5

@@ -1,0 +1,9 @@
+{
+  "gcode_state": "RUNNING",
+  "state": "printing",
+  "nozzle_temperature": 220.0,
+  "bed_temperature": 60.0,
+  "progress": 20,
+  "layer": 30,
+  "remaining_seconds": 2880
+}

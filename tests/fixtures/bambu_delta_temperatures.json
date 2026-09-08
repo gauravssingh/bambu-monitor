@@ -1,0 +1,8 @@
+{
+  "print": {
+    "nozzle_temper": 215.2,
+    "nozzle_target_temper": 220.0,
+    "bed_temper": 58.4,
+    "bed_target_temper": 60.0
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "gcode_state": "PREPARE",
+  "state": "preparing",
+  "subtask_name": "phone_stand.3mf",
+  "online": true,
+  "nozzle_temperature": 180.0,
+  "nozzle_target_temperature": 220.0,
+  "bed_temperature": 55.0,
+  "bed_target_temperature": 60.0,
+  "progress": 0,
+  "layer": 0,
+  "total_layers": 150,
+  "remaining_seconds": 3600
+}

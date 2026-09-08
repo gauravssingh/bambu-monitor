@@ -1,0 +1,10 @@
+{
+  "gcode_state": "IDLE",
+  "state": "idle",
+  "online": true,
+  "nozzle_temperature": 25.0,
+  "bed_temperature": 24.0,
+  "progress": 0,
+  "layer": 0,
+  "total_layers": 0
+}
