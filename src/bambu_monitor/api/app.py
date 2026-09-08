@@ -160,6 +160,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if settings.application.enable_discovery:
         discovery_task = asyncio.create_task(_background_ip_tracker(printer_repo, mqtt_clients))
 
+    outbox_worker = None
+    if settings.events.delivery.enabled:
+        from bambu_monitor.delivery import OutboxDeliveryWorker
+        outbox_worker = OutboxDeliveryWorker(
+            outbox_repo=outbox_repo,
+            printer_repo=printer_repo,
+            config=settings.events.delivery,
+        )
+        outbox_worker.start()
+        app.state.outbox_worker = outbox_worker
+
     logger.info("Bambu Monitor initialized successfully with %d printer(s).", len(all_printers))
     yield
 
@@ -167,6 +178,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     flush_task.cancel()
     if discovery_task:
         discovery_task.cancel()
+    if outbox_worker:
+        await outbox_worker.stop()
 
     for task in (flush_task, discovery_task):
         if task:

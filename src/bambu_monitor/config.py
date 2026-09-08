@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -66,12 +66,15 @@ class PrinterConfig(BaseModel):
 
 class DeliveryConfig(BaseModel):
     enabled: bool = True
-    endpoint: str = "http://localhost:8080/events"
+    endpoint: str = "http://localhost:8644/webhooks/bambu-printer"
+    secret: Optional[str] = None
     timeout_seconds: int = 10
     retry_attempts: int = 5
     initial_backoff_seconds: float = 2.0
     backoff_multiplier: float = 2.0
     max_backoff_seconds: float = 300.0
+    poll_interval_seconds: float = 1.0
+    filter_events: Optional[List[str]] = None
 
 
 class EventsConfig(BaseModel):

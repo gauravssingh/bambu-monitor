@@ -22,7 +22,8 @@ printers: []
 events:
   delivery:
     enabled: true
-    endpoint: ${EVENT_ENDPOINT:http://localhost:8080/events}
+    endpoint: ${EVENT_ENDPOINT:http://localhost:8644/webhooks/bambu-printer}
+    secret: ${EVENT_SECRET:bambu-secret-8f92a4e7c10b42d591}
     timeout_seconds: 10
     retry_attempts: 5
     initial_backoff_seconds: 2.0
