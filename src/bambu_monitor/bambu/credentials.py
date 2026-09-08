@@ -19,11 +19,40 @@ KEYRING_SERVICE_NAME = "bambu-monitor"
 LOCAL_CREDS_FILE = Path("./data/.credentials")
 
 
-def _get_machine_derived_key() -> bytes:
-    """Generate a deterministic local encryption key for headless fallback."""
+def _get_encryption_key() -> bytes:
+    """Resolve encryption key for headless fallback store.
+    
+    Threat Model & Security Boundary:
+    1. If BAMBU_ENCRYPTION_KEY or BAMBU_CREDENTIAL_KEY is provided in the environment,
+       a 32-byte Fernet key is derived from it. This allows secret separation in headless
+       server or containerized deployments.
+    2. If no environment key is provided, a machine-derived seed based on host nodename
+       and UID is used.
+       NOTE: This machine-derived fallback guards against ACCIDENTAL DISCLOSURE
+       (such as accidental git commits, plain-text backups, log ingestion, or filesystem grep).
+       It does NOT defend against a fully compromised host or an attacker who has gained local
+       user execution, because the seed derivation inputs and the encrypted store reside on the
+       same host. For hardened production without an OS Keyring, set BAMBU_ENCRYPTION_KEY or
+       BAMBU_ACCESS_CODE directly.
+    """
+    env_master = os.environ.get("BAMBU_ENCRYPTION_KEY") or os.environ.get("BAMBU_CREDENTIAL_KEY")
+    if env_master:
+        digest = hashlib.sha256(env_master.strip().encode("utf-8")).digest()
+        return base64.urlsafe_b64encode(digest)
+
     seed = f"{os.uname().nodename}:{os.getuid() if hasattr(os, 'getuid') else 'win'}:bambu-monitor-salt"
     digest = hashlib.sha256(seed.encode("utf-8")).digest()
     return base64.urlsafe_b64encode(digest)
+
+
+def get_credential_store_info() -> tuple[bool, str]:
+    """Return whether store is secure and a descriptive status string."""
+    if is_keyring_available():
+        backend_name = keyring.get_keyring().__class__.__name__
+        return True, f"Secure OS Keyring ({backend_name})"
+    if os.environ.get("BAMBU_ENCRYPTION_KEY") or os.environ.get("BAMBU_CREDENTIAL_KEY"):
+        return True, "Headless Encrypted Fallback (BAMBU_ENCRYPTION_KEY master key)"
+    return False, "Encrypted Local Fallback (machine-derived seed — protects against accidental disclosure only)"
 
 
 def is_keyring_available() -> bool:
@@ -46,7 +75,7 @@ def _load_fallback_store() -> dict[str, str]:
     if not LOCAL_CREDS_FILE.exists():
         return {}
     try:
-        fernet = Fernet(_get_machine_derived_key())
+        fernet = Fernet(_get_encryption_key())
         encrypted = LOCAL_CREDS_FILE.read_bytes()
         decrypted = fernet.decrypt(encrypted)
         return json.loads(decrypted.decode("utf-8"))
@@ -58,7 +87,7 @@ def _load_fallback_store() -> dict[str, str]:
 def _save_fallback_store(store: dict[str, str]) -> None:
     try:
         LOCAL_CREDS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fernet = Fernet(_get_machine_derived_key())
+        fernet = Fernet(_get_encryption_key())
         raw = json.dumps(store).encode("utf-8")
         encrypted = fernet.encrypt(raw)
         LOCAL_CREDS_FILE.write_bytes(encrypted)

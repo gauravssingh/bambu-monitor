@@ -14,6 +14,7 @@ from typing import Optional
 from bambu_monitor.bambu.credentials import (
     delete_access_code,
     get_access_code,
+    get_credential_store_info,
     is_keyring_available,
     store_access_code,
 )
@@ -252,11 +253,9 @@ async def cmd_doctor(settings: Optional[Settings] = None) -> None:
         print("SQLite Database         ✗ Issues detected")
 
     # 2. Keyring / Credential Store
-    keyring_ok = is_keyring_available()
-    if keyring_ok:
-        print("Credential Store        ✓ Secure OS keyring available")
-    else:
-        print("Credential Store        ! OS Keyring unavailable (using encrypted local fallback)")
+    is_secure, store_desc = get_credential_store_info()
+    symbol = "✓" if is_secure else "!"
+    print(f"Credential Store        {symbol} {store_desc}")
 
     # 3. Network Discovery
     try:
@@ -323,9 +322,13 @@ async def cmd_remove(printer_id: str, settings: Optional[Settings] = None) -> No
     delete_access_code(printer.serial_number)
     conn = await db.get_connection()
     try:
+        await conn.execute("DELETE FROM outbox WHERE printer_id = ?", (printer_id,))
+        await conn.execute("DELETE FROM events WHERE printer_id = ?", (printer_id,))
+        await conn.execute("DELETE FROM alerts WHERE printer_id = ?", (printer_id,))
+        await conn.execute("DELETE FROM print_jobs WHERE printer_id = ?", (printer_id,))
         await conn.execute("DELETE FROM printers WHERE id = ?", (printer_id,))
         await conn.commit()
-        print(f"✓ Printer '{printer_id}' and associated credentials removed.")
+        print(f"✓ Printer '{printer_id}' and associated data/credentials removed.")
     finally:
         await conn.close()
 

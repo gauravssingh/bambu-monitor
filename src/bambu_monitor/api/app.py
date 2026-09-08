@@ -99,14 +99,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # 1. Register configured printers
     for p_cfg in settings.printers:
-        printer = Printer(
-            id=p_cfg.id,
-            model=p_cfg.model,
-            serial_number=p_cfg.serial_number,
-            host=p_cfg.host,
-            online=False,
-        )
-        await printer_repo.save(printer)
+        existing = await printer_repo.get(p_cfg.id)
+        if not existing:
+            printer = Printer(
+                id=p_cfg.id,
+                model=p_cfg.model,
+                serial_number=p_cfg.serial_number,
+                host=p_cfg.host,
+                online=False,
+            )
+            await printer_repo.save(printer)
         state_manager.register_printer(p_cfg.id, model=p_cfg.model)
         await state_manager.reconcile_on_startup(p_cfg.id)
 

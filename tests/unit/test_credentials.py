@@ -9,17 +9,27 @@ from unittest.mock import patch
 from bambu_monitor.bambu.credentials import (
     delete_access_code,
     get_access_code,
+    get_credential_store_info,
     store_access_code,
-    _get_machine_derived_key,
+    _get_encryption_key,
     _load_fallback_store,
     _save_fallback_store,
 )
 
 
-def test_machine_derived_key_format():
-    key = _get_machine_derived_key()
+def test_encryption_key_format():
+    key = _get_encryption_key()
     assert isinstance(key, bytes)
     assert len(key) == 44  # Base64 urlsafe 32-byte digest
+
+
+def test_bambu_encryption_key_env_override(monkeypatch):
+    monkeypatch.setenv("BAMBU_ENCRYPTION_KEY", "custom_secret_passphrase_here")
+    key = _get_encryption_key()
+    assert isinstance(key, bytes)
+    assert len(key) == 44
+    is_secure, desc = get_credential_store_info()
+    assert "BAMBU_ENCRYPTION_KEY" in desc
 
 
 def test_store_and_retrieve_fallback(tmp_path: Path, monkeypatch):

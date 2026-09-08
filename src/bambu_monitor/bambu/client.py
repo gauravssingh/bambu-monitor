@@ -74,6 +74,10 @@ class BambuMqttClient:
         client.username_pw_set(BAMBU_LAN_USERNAME, self.get_password())
 
         # Configure TLS
+        # Bambu Lab 3D printers in LAN Mode run an embedded MQTT broker on port 8883
+        # with a self-signed X.509 certificate. Setting check_hostname=False and
+        # verify_mode=CERT_NONE is strictly scoped to this local printer connection.
+        # This bypass is NEVER applied to outbound consumer webhooks (e.g. Hermes).
         ssl_ctx = ssl.create_default_context()
         if not self.tls_verify:
             ssl_ctx.check_hostname = False

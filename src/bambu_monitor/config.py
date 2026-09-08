@@ -48,7 +48,15 @@ class PrinterConfig(BaseModel):
     username: str = "bblp"
     port: int = 8883
     tls: bool = True
-    tls_verify: bool = False
+    # tls_verify is strictly scoped to local Bambu printer communication:
+    # Bambu Lab printers in LAN Mode generate an untrusted, self-signed local X.509 certificate
+    # for their embedded MQTT broker on port 8883. Disabling verification enables encrypted local
+    # transport without requiring a custom CA root. This setting MUST NOT be reused for external
+    # outbound integrations (such as Hermes webhooks or cloud APIs).
+    tls_verify: bool = Field(
+        default=False,
+        description="Bambu local MQTT self-signed certificate verification bypass (local printer only)",
+    )
 
     @field_validator("access_code", mode="before")
     @classmethod
