@@ -1,119 +1,303 @@
 # Bambu Monitor
 
-Standalone local service for monitoring Bambu Lab 3D printers.
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Tests: 47 Passed](https://img.shields.io/badge/tests-47%20passed-brightgreen.svg)]()
+[![Architecture: Phase 1--4 Complete](https://img.shields.io/badge/architecture-Phase%201--4%20Complete-blueviolet.svg)]()
+[![Database: SQLite WAL](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)]()
 
-Bambu Monitor turns Bambu 3D printers on your local network into a reliable, queryable, event-driven service. It normalizes delta-based MQTT telemetry into durable canonical state, robust print job lifecycles, and semantic events.
+**Bambu Monitor** is a standalone local service that turns Bambu Lab 3D printers on your local network into a reliable, queryable, event-driven service.
 
-> **Guiding Axiom**: *Bambu Monitor owns device truth. Hermes owns intelligence.*
+It continuously ingests delta-based MQTT telemetry from the printer, normalizes it into durable canonical state, manages print job and alert lifecycles, and delivers critical domain events to external consumers (like **Hermes** for Telegram notifications) through a reliable, transactional outbox queue.
 
----
-
-## Features
-
-* **Real Device Ingestion**: Connects locally over MQTT with TLS (port 8883), `bblp` authentication, self-signed certificate bypass, and automated `pushall` state synchronization.
-* **Zero-Touch LAN Discovery**: Automatically discovers Bambu printers using UDP broadcast on port 2021 and SSDP M-SEARCH active probing.
-* **Dual Operating Modes**: Runs as a long-running daemon service (`bambu-monitor run` or `bambu-monitor`) or a standalone administrative CLI tool.
-* **Interactive & Automated Onboarding**: Discover and configure printers interactively or via scripted non-interactive CLI flags.
-* **Hardware-Grade Credential Security**: LAN Access Codes stored securely in the host OS Keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager) with AES-GCM encrypted local fallback. Credentials are never written to SQLite database records or exposed in APIs.
-* **Dynamic IP Tracking**: Printers are keyed to immutable hardware serial numbers. DHCP IP changes are automatically detected and reconnected without service restart.
-* **Dual-Layer State Engine**: In-memory state for instantaneous $O(1)$ reads, backed by SQLite in mandatory WAL mode for persistence.
-* **Deterministic Print Tracking**: Automatic synthesis of deterministic job IDs, active print tracking, and crash-restart re-attachment.
-* **Adaptive Stall Detection & Alert Lifecycle**: Multi-factor stall detection factoring total print duration, avoiding false positives on long prints, with alert suppression and resolution notifications.
-* **REST & SSE APIs**: Comprehensive REST endpoints and real-time Server-Sent Events (SSE) streaming.
+> **Guiding Architectural Axiom**:  
+> *Bambu Monitor owns device truth. Hermes owns intelligence.*  
+> Bambu Monitor is completely standalone and contains zero dependencies on Hermes, cloud accounts, or external services.
 
 ---
 
-## Installation
+## Architecture Overview
 
-Requires Python 3.12+.
+```mermaid
+graph TD
+    A[Bambu 3D Printer\ne.g. A1 / A1 Mini] -->|Raw MQTT deltas :8883 TLS| B[Bambu Monitor]
+    
+    subgraph "Bambu Monitor (Local Service)"
+        B --> C[Bambu MQTT Ingestion\nClient ID isolation + pushall]
+        C --> D[TelemetryPatch Normalizer]
+        D --> E[In-Memory State Engine\nO 1 instant reads]
+        E --> F[SQLite WAL Database\nPrinters · Jobs · Alerts · Events]
+        E --> G[Alert & Job Lifecycles\nAdaptive stall detector]
+        G --> H[Event Store & Outbox Queue\nPer-printer sequential FIFO]
+    end
 
+    H -->|HTTP POST + HMAC-SHA256\nPhase 4 Outbox Worker| I[Hermes Gateway :8644\n/webhooks/bambu-printer]
+    I -->|Push Notification| J[Telegram Bot\nChat: 1117425083]
+    
+    E -->|REST API :8000| K[External Consumers / Dashboards]
+    E -->|SSE Stream :8000| L[Real-Time Live UI]
+```
+
+---
+
+## Core Capabilities
+
+* **Real Device MQTT Ingestion**: Direct local TLS connection to printer on port 8883 using `bblp` authentication, scoped self-signed certificate bypass, unique client ID isolation, and automated `pushall` state synchronization.
+* **Zero-Touch LAN Discovery**: Automatically discovers Bambu printers using UDP broadcast on port 2021 and SSDP M-SEARCH active probing, calibrated to Bambu's 10.24-second hardware heartbeat window.
+* **Hardware-Grade Credential Security**: LAN Access Codes stored exclusively in the host OS Keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager) with AES-GCM encrypted local fallback. Access codes are **never logged, never stored in SQLite database tables, and never exposed in REST APIs or SSE streams**.
+* **Dynamic IP Tracking**: Printers are keyed to immutable hardware serial numbers. DHCP IP re-assignments are automatically detected on the LAN and reconnected with zero service restart.
+* **Dual-Layer State Engine**: In-memory state representation for instantaneous reads, backed by throttled persistence to SQLite in mandatory `WAL` mode.
+* **Crash & Restart Recovery**: Deterministically re-attaches to active print jobs across service restarts by reconciling physical G-code states against persisted database state without generating duplicate jobs.
+* **Adaptive Multi-Factor Stall Detection**: Evaluates print duration, layer changes, nozzle temperature stability, and heating state to detect genuine nozzle blockages and mechanical stalls while preventing false positives on long print moves.
+* **Alert Lifecycle & Spam Suppression**: Full alert state machine (`ACTIVE` → `ACKNOWLEDGED` → `RESOLVED`). Fires notifications on trigger and resolution while completely suppressing repeated telemetry noise during active conditions.
+* **Reliable Outbox Delivery Worker (Phase 4)**: Background worker delivering domain events to webhook destinations with per-printer sequential FIFO ordering, exponential backoff, dead-letter queue (`failed` DLQ), and HMAC-SHA256 authentication.
+* **Native Background Service Management**: Built-in CLI commands to start, stop, restart, check status, and tail logs for background operation.
+
+---
+
+## Quickstart & Installation
+
+### 1. Requirements
+* Python 3.12 or higher
+* Bambu Lab 3D Printer (A1, A1 Mini, P1P, P1S, X1C) connected to the same LAN with **LAN Mode** enabled
+
+### 2. Install
 ```bash
+# Clone the repository
+git clone https://github.com/gauravssingh/bambu-monitor.git
+cd bambu-monitor
+
+# Create virtual environment and install
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+
+# Optional: Symlink to user PATH for global CLI usage
+mkdir -p ~/.local/bin
+ln -sf $(pwd)/.venv/bin/bambu-monitor ~/.local/bin/bambu-monitor
 ```
 
 ---
 
-## CLI Usage
+## First-Time Onboarding
 
-`bambu-monitor` includes an administrative CLI and a background daemon:
-
-### 1. Discover Printers on the Local Network
-```bash
-bambu-monitor discover
-```
-Scans UDP port 2021 and SSDP multicast for available printers.
-
-### 2. Onboard a Printer
-**Interactive Wizard**:
+### Interactive Onboarding Wizard
+Run the interactive onboarding command in your terminal:
 ```bash
 bambu-monitor onboard
 ```
-Automatically scans, lets you select a printer, prompts securely for the LAN Access Code (masked), verifies the TLS handshake, and stores credentials securely.
 
-**Automated / Scripted Onboarding**:
-```bash
-bambu-monitor onboard --serial 01P00A123456789 --ip 192.168.1.42 --access-code 12345678 --name "Living Room A1"
+The wizard will:
+1. Scan the local network for Bambu printers.
+2. Display discovered printers with hardware model and IP address.
+3. Prompt for the printer's **LAN Access Code** (found on printer screen: *Settings → Network → LAN Mode*).
+4. Verify the TLS handshake and authentication.
+5. Securely store credentials in your OS Keyring.
+6. Register the printer in SQLite WAL storage.
+
+```text
+Searching for Bambu printers on the local network (listening up to 12s for heartbeat broadcasts)...
+
+Found 1 printer:
+
+  [1] BBL_A1_Mini (A1 Mini)
+      Serial:  0309DA572602482
+      IP:      192.168.68.57
+      Port:    8883
+
+Select printer [1]: 1
+
+Enter LAN Access Code for A1 Mini (masked): ********
+Testing connection to 192.168.68.57:8883...
+✓ TLS connection established
+✓ Authentication verified
+
+✓ Printer registered: bambu-a1-mini-602482
+✓ Credentials stored securely in OS Keyring
+✓ Bambu A1 Mini is now ready for monitoring.
 ```
 
-### 3. Check Devices & Health Status
+### Scripted / Automated Onboarding
 ```bash
-# List configured devices and connection state
-bambu-monitor devices
+bambu-monitor onboard \
+  --serial 0309DA572602482 \
+  --ip 192.168.68.57 \
+  --access-code 12345678 \
+  --model "A1 Mini" \
+  --name "Lab A1 Mini"
+```
 
-# View live service, printer telemetry, and print job progress
-bambu-monitor status
+---
 
-# Run system, network, TLS, and credential diagnostics
+## Running the Service
+
+### Managing the Background Service
+Bambu Monitor includes native service lifecycle management:
+
+```bash
+# Start background daemon
+bambu-monitor service start
+
+# Check service and printer health
+bambu-monitor service status
+
+# Tail live daemon logs
+bambu-monitor service logs -n 50
+
+# Restart or stop the daemon
+bambu-monitor service restart
+bambu-monitor service stop
+```
+
+### Running in Foreground Mode
+```bash
+bambu-monitor run --host 0.0.0.0 --port 8000
+# or simply
+bambu-monitor
+```
+
+---
+
+## CLI Command Reference
+
+| Command | Description |
+| :--- | :--- |
+| `bambu-monitor discover` | Scans local network for Bambu printers via UDP/SSDP. |
+| `bambu-monitor onboard` | Launches interactive onboarding wizard or accepts scripted CLI arguments. |
+| `bambu-monitor status` | Displays overview of database health, configured printers, active print, and outbox status. |
+| `bambu-monitor devices` | Formatted table of all configured printers, IP addresses, and online statuses. |
+| `bambu-monitor doctor` | Runs end-to-end diagnostics on SQLite WAL, credential storage, discovery, and TLS. |
+| `bambu-monitor service <start\|stop\|restart\|status\|logs>` | Manages the background daemon process with PID tracking. |
+| `bambu-monitor reconnect <printer_id>` | Forces immediate MQTT reconnect, re-subscription, and state pushall. |
+| `bambu-monitor credentials <printer_id>` | Prompts for and updates stored LAN Access Code. |
+| `bambu-monitor remove <printer_id>` | Unregisters printer and purges credentials from the OS Keyring. |
+
+---
+
+## Hermes & Telegram Push Notifications
+
+Bambu Monitor integrates with **Hermes** to push real-time notifications to your **Telegram bot** for critical 3D printer events:
+* **Print Completion**: When a job finishes, reporting duration and layer stats.
+* **Blockage & Stalls**: When nozzle temperature is stable but zero progress occurs over the stall threshold.
+* **Filament Runout**: When AMS / spool sensors report filament empty.
+* **Printer Failures**: When print is aborted or encounters hardware HMS fault codes.
+* **Print Pauses**: When print is paused manually or by safety sensors.
+
+### 1. Bambu Monitor Configuration ([config.yaml](config.yaml))
+```yaml
+events:
+  delivery:
+    enabled: true
+    endpoint: ${EVENT_ENDPOINT:http://localhost:8644/webhooks/bambu-printer}
+    secret: ${EVENT_SECRET:bambu-secret-8f92a4e7c10b42d591}
+    timeout_seconds: 10
+    retry_attempts: 5
+    initial_backoff_seconds: 2.0
+    backoff_multiplier: 2.0
+    max_backoff_seconds: 300.0
+```
+
+### 2. Hermes Webhook Subscription (`~/.hermes/webhook_subscriptions.json`)
+```json
+{
+  "bambu-printer": {
+    "description": "Bambu 3D printer event notifications for completion, stall, and errors",
+    "events": [
+      "print.completed",
+      "print.failed",
+      "print.paused",
+      "print.resumed",
+      "alert.created",
+      "alert.resolved",
+      "print.started"
+    ],
+    "secret": "bambu-secret-8f92a4e7c10b42d591",
+    "prompt": "Bambu 3D Printer Event: {event_type}\nPrinter: {source}\nSeverity: {severity}\n\nEvent details:\n{__raw__}\n\nPlease send a concise, clear status update to Telegram.",
+    "deliver": "telegram",
+    "deliver_extra": {
+      "chat_id": "1117425083"
+    }
+  }
+}
+```
+
+### 3. Guaranteed Delivery & Reverse Acknowledgement
+* **Transport Acknowledgement**: When Bambu Monitor delivers an event, Hermes returns `HTTP 200 OK`. Bambu Monitor marks the event `delivered` in SQLite WAL and **never sends it again**.
+* **Alert Spam Suppression**: While an alert condition persists, the state engine suppresses duplicate events. Only **one** notification fires on trigger, and **one** on resolution.
+* **Operator Alert Acknowledgement**: Active alerts can be acknowledged via REST:
+  ```bash
+  curl -X POST http://localhost:8000/api/v1/printers/{printer_id}/alerts/{alert_id}/acknowledge
+  ```
+
+---
+
+## REST & SSE API Reference
+
+Base URL: `http://localhost:8000`
+
+### Health & Status
+* `GET /health` — Subsystem health check (SQLite WAL, memory status, outbox counts, printer summaries).
+* `GET /api/v1/outbox/status` — Outbox queue counts (`pending`, `delivering`, `delivered`, `failed_dlq`).
+
+### Printers
+* `GET /api/v1/printers` — List all configured printers.
+* `GET /api/v1/printers/{printer_id}` — Get printer details.
+* `GET /api/v1/printers/{printer_id}/status` — Live canonical status:
+  ```json
+  {
+    "printer_id": "bambu-a1-mini-602482",
+    "model": "A1 Mini",
+    "online": true,
+    "state": "completed",
+    "print": null,
+    "temperatures": {
+      "nozzle": 28.1,
+      "nozzle_target": 0.0,
+      "bed": 27.6,
+      "bed_target": 0.0,
+      "chamber": 5.0
+    },
+    "last_seen": "2026-09-08T13:01:57Z",
+    "updated_at": "2026-09-08T13:01:57Z"
+  }
+  ```
+* `POST /api/v1/printers/{printer_id}/reconnect` — Trigger immediate MQTT reconnect and pushall.
+
+### Print Jobs
+* `GET /api/v1/printers/{printer_id}/prints/active` — Active print job (`200 OK` or `204 No Content`).
+* `GET /api/v1/printers/{printer_id}/prints` — Historical print records.
+
+### Alerts
+* `GET /api/v1/printers/{printer_id}/alerts?active_only=true` — Query active or historical alerts.
+* `POST /api/v1/printers/{printer_id}/alerts/{alert_id}/acknowledge` — Transition alert from `ACTIVE` → `ACKNOWLEDGED`.
+
+### Real-Time Events (SSE)
+* `GET /api/v1/printers/{printer_id}/events/stream` — Real-time Server-Sent Events stream for live dashboards.
+
+---
+
+## Security Architecture & Threat Boundaries
+
+1. **Local Network Privacy**: Bambu Monitor communicates with Bambu printers exclusively over the local subnet (RFC 1918). No telemetry is transmitted to cloud servers.
+2. **Scoped TLS Certificate Bypass**: Bambu Lab printers in LAN mode use self-signed X.509 certificates on port 8883. Disabling host verification (`tls_verify: false`) is **strictly isolated to local printer connections** and is never applied to outbound consumer webhooks.
+3. **Secret Isolation**: Access codes are stored in the host OS Keyring. The database contains no credentials, making SQLite database files completely safe for backup and inspection.
+
+---
+
+## Testing & Diagnostics
+
+The test suite is fully decoupled from physical printer hardware using stored fixtures:
+
+```bash
+# Run the complete test suite (47 unit and integration tests)
+pytest -v
+
+# Run system and network diagnostics on your environment
 bambu-monitor doctor
 ```
 
-### 4. Manage Credentials & Connection
-```bash
-# Force immediate MQTT reconnect and telemetry pushall
-bambu-monitor reconnect bambu-a1
-
-# Update LAN Access Code
-bambu-monitor credentials bambu-a1
-
-# Remove printer and wipe stored credentials
-bambu-monitor remove bambu-a1
-```
-
-### 5. Run Daemon Service
-```bash
-# Start background monitoring daemon and API server
-bambu-monitor run --host 0.0.0.0 --port 8000
-```
-*(Or simply `bambu-monitor`)*
-
 ---
 
-## API Endpoints
+## License
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/health` | System, database (WAL), and printer health summary |
-| `GET` | `/api/v1/printers` | List all configured printers |
-| `GET` | `/api/v1/printers/{id}` | Get printer details |
-| `GET` | `/api/v1/printers/{id}/status` | Current live state (temperatures, state, job) |
-| `GET` | `/api/v1/printers/{id}/prints/active` | Current active print (`200 OK` or `204 No Content`) |
-| `GET` | `/api/v1/printers/{id}/prints` | Historical prints for printer |
-| `GET` | `/api/v1/printers/{id}/alerts` | Active and historical alerts |
-| `POST`| `/api/v1/printers/{id}/alerts/{alert_id}/acknowledge` | Acknowledge active alert |
-| `GET` | `/api/v1/printers/{id}/events` | Historical domain events |
-| `GET` | `/api/v1/printers/{id}/events/stream` | Server-Sent Events (SSE) live event stream |
-| `POST`| `/api/v1/printers/{id}/reconnect` | Trigger MQTT reconnect and pushall |
-| `GET` | `/api/v1/outbox/status` | Outbox message counts (pending, delivering, failed) |
-
----
-
-## Testing
-
-The entire test suite runs independently of physical printer hardware:
-
-```bash
-# Run complete test suite (41 unit and integration tests)
-pytest -v
-```
+This project is licensed under the [MIT License](LICENSE).
