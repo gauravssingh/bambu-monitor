@@ -22,6 +22,7 @@ from bambu_monitor.storage.repositories import (
     OutboxRepository,
     PrinterRepository,
 )
+from bambu_monitor.camera import CameraClient, CameraRegistry
 from bambu_monitor.api.routes import router
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state.mqtt_clients = mqtt_clients
 
-    # 4. Start background tasks
+    # 4. Register RTSP cameras if configured
+    camera_registry = CameraRegistry()
+    for p_cfg in settings.printers:
+        if p_cfg.camera and p_cfg.camera.enabled and p_cfg.camera.rtsp_url:
+            cam_client = CameraClient(config=p_cfg.camera, printer_id=p_cfg.id)
+            camera_registry.register(p_cfg.id, cam_client)
+            logger.info("Configured camera for printer '%s' (%s)", p_cfg.id, cam_client.sanitized_url)
+    app.state.camera_registry = camera_registry
+
+    # 5. Start background tasks
     flush_task = asyncio.create_task(_periodic_state_flusher(state_manager, settings))
     discovery_task = None
     if settings.application.enable_discovery:

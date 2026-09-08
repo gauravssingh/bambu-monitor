@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+from bambu_monitor.camera.config import CameraConfig
+
+
 def _interpolate_env_vars(raw: str) -> str:
     """Replace ${VAR_NAME} or ${VAR_NAME:default} with environment variable values."""
     pattern = re.compile(r"\$\{(\w+)(?::([^}]*))?\}")
@@ -56,6 +59,10 @@ class PrinterConfig(BaseModel):
     tls_verify: bool = Field(
         default=False,
         description="Bambu local MQTT self-signed certificate verification bypass (local printer only)",
+    )
+    camera: Optional[CameraConfig] = Field(
+        default=None,
+        description="Optional RTSP camera configuration for visual monitoring",
     )
 
     @field_validator("access_code", mode="before")
@@ -120,13 +127,34 @@ class Settings(BaseSettings):
 
 
 def load_config(config_path: str | Path | None = None) -> Settings:
-    """Load configuration from the specified path or default locations."""
+    """Load configuration from the specified path or standard search locations.
+
+    When loaded via default search locations, relative database paths are anchored
+    to the configuration directory rather than arbitrary CWD.
+    """
     if config_path:
         return Settings.from_yaml(config_path)
 
+    candidates: List[Path] = []
+    if os.environ.get("BAMBU_CONFIG_PATH"):
+        candidates.append(Path(os.environ["BAMBU_CONFIG_PATH"]))
+
     for default_file in ("config.yaml", "config.yml"):
-        p = Path(default_file)
-        if p.exists():
-            return Settings.from_yaml(p)
+        candidates.append(Path(default_file))
+
+    # Check repository/project root relative to this module
+    project_root = Path(__file__).resolve().parent.parent.parent
+    candidates.append(project_root / "config.yaml")
+    candidates.append(project_root / "config.yml")
+    candidates.append(Path.home() / ".config" / "bambu-monitor" / "config.yaml")
+
+    found_path = next((c for c in candidates if c.is_file()), None)
+    if found_path:
+        settings = Settings.from_yaml(found_path)
+        base_dir = found_path.resolve().parent
+        db_path = Path(settings.database.path)
+        if not db_path.is_absolute():
+            settings.database.path = str((base_dir / db_path).resolve())
+        return settings
 
     return Settings()

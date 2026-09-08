@@ -9,6 +9,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from starlette.responses import StreamingResponse
 
+from bambu_monitor.camera import (
+    CameraCaptureError,
+    CameraConfigError,
+    CameraConnectionError,
+    CameraError,
+    CameraRegistry,
+    CameraTimeoutError,
+)
 from bambu_monitor.domain.alerts import Alert
 from bambu_monitor.domain.events import DomainEvent
 from bambu_monitor.domain.printer import CurrentPrinterState, Printer
@@ -283,4 +291,47 @@ async def reconnect_printer(
     client.stop()
     client.start()
     return {"status": "reconnecting", "printer_id": printer_id}
+
+
+# --- Camera Endpoints ---
+
+@router.get(
+    "/api/v1/printers/{printer_id}/camera/snapshot",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"image/jpeg": {}},
+            "description": "Binary JPEG image snapshot from the RTSP camera",
+        },
+        400: {"description": "Invalid camera configuration"},
+        404: {"description": "Printer or camera not configured or disabled"},
+        502: {"description": "Camera connection or frame capture failure"},
+        504: {"description": "Camera snapshot timeout"},
+    },
+)
+async def get_camera_snapshot(printer_id: str, request: Request) -> Response:
+    """Capture and return a fresh JPEG snapshot from the printer's RTSP camera."""
+    camera_registry: Optional[CameraRegistry] = getattr(request.app.state, "camera_registry", None)
+    camera = camera_registry.get(printer_id) if camera_registry else None
+
+    if not camera:
+        printer_repo: Optional[PrinterRepository] = getattr(request.app.state, "printer_repo", None)
+        if printer_repo and not await printer_repo.get(printer_id):
+            raise HTTPException(status_code=404, detail=f"Printer '{printer_id}' not found")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active camera configured for printer '{printer_id}'",
+        )
+
+    try:
+        jpeg_bytes = await camera.snapshot()
+        return Response(content=jpeg_bytes, media_type="image/jpeg")
+    except CameraTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc))
+    except (CameraConnectionError, CameraCaptureError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except CameraConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except CameraError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 

@@ -10,6 +10,8 @@ from typing import Optional
 import uvicorn
 
 from bambu_monitor.cli.commands import (
+    cmd_camera_snap,
+    cmd_camera_test,
     cmd_credentials,
     cmd_devices,
     cmd_discover,
@@ -136,6 +138,17 @@ def build_parser() -> argparse.ArgumentParser:
     svc_logs = svc_sub.add_parser("logs", help="View background daemon logs")
     svc_logs.add_argument("-n", "--lines", type=int, default=50, help="Number of lines to show")
 
+    # 11. camera
+    cam_parser = subparsers.add_parser("camera", help="Manage and test RTSP camera streams")
+    cam_sub = cam_parser.add_subparsers(dest="camera_action")
+
+    cam_test = cam_sub.add_parser("test", help="Test RTSP camera connection and probe stream diagnostics")
+    cam_test.add_argument("printer_id", help="ID of printer to test camera for")
+
+    cam_snap = cam_sub.add_parser("snap", help="Capture a single JPEG snapshot from RTSP camera")
+    cam_snap.add_argument("printer_id", help="ID of printer")
+    cam_snap.add_argument("-o", "--output", help="Output file path for captured JPEG", default=None)
+
     return parser
 
 
@@ -217,6 +230,15 @@ def main() -> None:
             cmd_service_logs(lines=args.lines)
         else:
             parser.parse_args(["service", "--help"])
+
+    elif cmd == "camera":
+        action = getattr(args, "camera_action", None)
+        if action == "test":
+            asyncio.run(cmd_camera_test(printer_id=args.printer_id, settings=settings))
+        elif action == "snap":
+            asyncio.run(cmd_camera_snap(printer_id=args.printer_id, output=args.output, settings=settings))
+        else:
+            parser.parse_args(["camera", "--help"])
 
     else:
         parser.print_help()

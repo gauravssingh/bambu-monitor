@@ -10,14 +10,21 @@ database:
   flush_interval_seconds: 5.0
 
 # Configured printers (or onboard dynamically via 'bambu-monitor onboard')
-printers: []
-# - id: bambu-a1-mini
-#   model: A1 Mini
-#   host: 192.168.68.57
-#   serial_number: 0309DA572602482
-#   port: 8883
-#   tls: true
-#   tls_verify: false
+printers:
+  - id: bambu-a1-mini-602482
+    model: A1 Mini
+    host: 192.168.68.57
+    serial_number: 0309DA572602482
+    port: 8883
+    tls: true
+    tls_verify: false
+    camera:
+      enabled: true
+      # Set A1_MINI_CAMERA_RTSP in the environment; credentials must not be committed.
+      rtsp_url: ${A1_MINI_CAMERA_RTSP:}
+      timeout_seconds: 5.0
+      probe_size_bytes: 1048576
+      analyze_duration_us: 1000000
 
 events:
   delivery:

@@ -11,6 +11,7 @@ from pathlib import Path
 import socket
 import ssl
 import sys
+import time
 from typing import Optional
 
 from bambu_monitor.bambu.credentials import (
@@ -23,6 +24,7 @@ from bambu_monitor.bambu.credentials import (
 from bambu_monitor.bambu.discovery import DiscoveredPrinter, discover_printers
 from bambu_monitor.bambu.protocol import BAMBU_DISCOVERY_PORT, BAMBU_LAN_USERNAME, BAMBU_MQTT_PORT
 from bambu_monitor.config import Settings, load_config
+from bambu_monitor.camera import CameraClient, CameraError
 from bambu_monitor.domain.printer import Printer
 from bambu_monitor.storage.database import Database
 from bambu_monitor.storage.repositories import (
@@ -561,5 +563,102 @@ def cmd_service_logs(lines: int = 50) -> None:
     recent = content[-lines:] if len(content) > lines else content
     for line in recent:
         print(line)
+
+
+async def cmd_camera_snap(
+    printer_id: str,
+    output: Optional[str] = None,
+    settings: Optional[Settings] = None,
+) -> None:
+    """Capture a single JPEG snapshot from the printer's RTSP camera."""
+    active_settings = settings or load_config()
+    p_cfg = next((p for p in active_settings.printers if p.id == printer_id), None)
+    if not p_cfg:
+        print(f"Error: Printer '{printer_id}' is not configured in config.yaml.")
+        return
+
+    if not p_cfg.camera:
+        print(f"Error: No camera configured for printer '{printer_id}'.")
+        print("Tip: Add a 'camera' section to the printer in config.yaml.")
+        return
+
+    if not p_cfg.camera.enabled:
+        print(f"Error: Camera for printer '{printer_id}' is disabled in configuration.")
+        return
+
+    if not p_cfg.camera.rtsp_url:
+        print(f"Error: RTSP URL is empty for printer '{printer_id}'.")
+        return
+
+    client = CameraClient(config=p_cfg.camera, printer_id=printer_id)
+    print(f"\nCapturing snapshot from camera for {printer_id} ({client.sanitized_url})...")
+
+    t0 = time.perf_counter()
+    try:
+        jpeg_bytes = await client.snapshot()
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+    except CameraError as exc:
+        print(f"\nError: Camera snapshot failed: {exc}\n")
+        return
+
+    out_path = Path(output) if output else Path(f"./snapshot_{printer_id}_{int(time.time())}.jpg")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(jpeg_bytes)
+
+    size_kb = len(jpeg_bytes) / 1024.0
+    print(f"  ✓ Captured snapshot successfully ({size_kb:.1f} KB) in {elapsed_ms:.1f}ms")
+    print(f"  ✓ Saved to: {out_path.resolve()}\n")
+
+
+async def cmd_camera_test(
+    printer_id: str,
+    settings: Optional[Settings] = None,
+) -> None:
+    """Probe RTSP camera stream and print diagnostic metrics."""
+    active_settings = settings or load_config()
+    p_cfg = next((p for p in active_settings.printers if p.id == printer_id), None)
+    if not p_cfg:
+        print(f"Error: Printer '{printer_id}' is not configured in config.yaml.")
+        return
+
+    if not p_cfg.camera:
+        print(f"Error: No camera configured for printer '{printer_id}'.")
+        print("Tip: Add a 'camera' section to the printer in config.yaml.")
+        return
+
+    if not p_cfg.camera.enabled:
+        print(f"Error: Camera for printer '{printer_id}' is disabled in configuration.")
+        return
+
+    if not p_cfg.camera.rtsp_url:
+        print(f"Error: RTSP URL is empty for printer '{printer_id}'.")
+        return
+
+    client = CameraClient(config=p_cfg.camera, printer_id=printer_id)
+    print(f"\nTesting RTSP camera for {printer_id} ({client.sanitized_url})...")
+    print(f"  FFmpeg:               {p_cfg.camera.ffmpeg_bin}")
+    print(f"  Transport:            TCP")
+    print(f"  Probe Size:           {p_cfg.camera.probe_size_bytes} bytes")
+    print(f"  Analyze Duration:     {p_cfg.camera.analyze_duration_us} us")
+    print(f"  Timeout:              {p_cfg.camera.timeout_seconds}s\n")
+
+    diag = await client.test_connection()
+    if not diag.get("connected"):
+        print(f"  ✗ Connection / Capture: FAILED")
+        print(f"  Error: {diag.get('error')}\n")
+        return
+
+    print("  ✓ Connection & Handshake: SUCCESS")
+    if diag.get("snapshot_latency_ms") is not None:
+        print(f"  ✓ Snapshot Latency:       {diag['snapshot_latency_ms']} ms")
+    if diag.get("image_size_bytes") is not None:
+        print(f"  ✓ Frame Size:             {diag['image_size_bytes'] / 1024.0:.1f} KB")
+    if diag.get("codec"):
+        print(f"  ✓ Video Codec:            {diag['codec']}")
+    if diag.get("resolution"):
+        print(f"  ✓ Resolution:             {diag['resolution']}")
+    if diag.get("fps"):
+        print(f"  ✓ Framerate:              {diag['fps']}")
+    print("\nCamera stream is verified and ready for monitoring!\n")
 
 
