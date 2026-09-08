@@ -189,3 +189,65 @@ async def test_list_and_get_frames(async_client: AsyncClient, tmp_path: Path):
     # 404 for missing frame
     resp_missing_frame = await async_client.get("/api/v1/printers/test-a1/timelapses/tl-frames-1/frames/999")
     assert resp_missing_frame.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_metadata_and_html_views(async_client: AsyncClient, tmp_path: Path):
+    app = async_client._transport.app
+    timelapse_repo = app.state.timelapse_repo
+    storage: TimelapseStorage = app.state.timelapse_storage
+
+    session_dir = tmp_path / "tl_session_view"
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    session = TimelapseSession(
+        id="tl-view-1",
+        printer_id="test-a1",
+        print_job_id="job-view-1",
+        status=TimelapseStatus.COMPLETED,
+        frame_count=20,
+        fps=30,
+        storage_dir=str(session_dir),
+    )
+    await timelapse_repo.save_session(session)
+
+    # Record metadata lines
+    storage.append_frame_metadata(session_dir, {
+        "frame": 1,
+        "filename": "000001.jpg",
+        "reason": "layer_change",
+        "layer": 1,
+        "progress": 5.0,
+    })
+    storage.append_frame_metadata(session_dir, {
+        "frame": 2,
+        "filename": "000002.jpg",
+        "reason": "interval",
+        "layer": 1,
+        "progress": 7.5,
+    })
+
+    # 1. Metadata endpoint
+    resp_meta = await async_client.get("/api/v1/printers/test-a1/timelapses/tl-view-1/metadata")
+    assert resp_meta.status_code == 200
+    meta_records = resp_meta.json()
+    assert len(meta_records) == 2
+    assert meta_records[0]["reason"] == "layer_change"
+    assert meta_records[0]["layer"] == 1
+    assert meta_records[1]["reason"] == "interval"
+
+    # 2. View HTML endpoint
+    resp_view = await async_client.get("/api/v1/printers/test-a1/timelapses/tl-view-1/view")
+    assert resp_view.status_code == 200
+    assert "text/html" in resp_view.headers["content-type"]
+    assert "tl-view-1" in resp_view.text
+    assert "<video" in resp_view.text
+    assert "Download MP4" in resp_view.text
+
+    # 3. Gallery HTML endpoint
+    resp_gallery = await async_client.get("/api/v1/printers/test-a1/timelapses/gallery")
+    assert resp_gallery.status_code == 200
+    assert "text/html" in resp_gallery.headers["content-type"]
+    assert "Timelapse Gallery" in resp_gallery.text
+    assert "tl-view-1" in resp_gallery.text
+

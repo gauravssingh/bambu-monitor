@@ -24,6 +24,7 @@ class FrameCaptureWorker:
         session: TimelapseSession,
         camera: CameraClient,
         storage: TimelapseStorage,
+        mode: str = "interval",
         on_frame_captured: Optional[Callable[[int, Path], Awaitable[None]]] = None,
         on_degraded: Optional[Callable[[str], Awaitable[None]]] = None,
         on_recovered: Optional[Callable[[], Awaitable[None]]] = None,
@@ -31,6 +32,7 @@ class FrameCaptureWorker:
         self.session = session
         self.camera = camera
         self.storage = storage
+        self.mode = mode
         self.on_frame_captured = on_frame_captured
         self.on_degraded = on_degraded
         self.on_recovered = on_recovered
@@ -40,6 +42,9 @@ class FrameCaptureWorker:
         self._task: Optional[asyncio.Task[None]] = None
         self._camera_online: bool = True
         self._outage_start: Optional[datetime] = None
+        self._last_capture_mono: float = 0.0
+        self._min_trigger_cooldown: float = 1.0
+        self._lock = asyncio.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -57,8 +62,9 @@ class FrameCaptureWorker:
         self._paused = (self.session.status == TimelapseStatus.PAUSED)
         self._task = asyncio.create_task(self._capture_loop())
         logger.info(
-            "FrameCaptureWorker started for session %s (interval: %.1fs)",
+            "FrameCaptureWorker started for session %s (mode: %s, interval: %.1fs)",
             self.session.id,
+            self.mode,
             self.session.capture_interval_seconds,
         )
 
@@ -90,18 +96,33 @@ class FrameCaptureWorker:
             logger.debug("Error closing camera on worker stop: %s", exc)
         logger.info("FrameCaptureWorker stopped for session %s", self.session.id)
 
-    async def _capture_loop(self) -> None:
-        """Main capture loop executing non-blocking periodic snapshots."""
-        interval = max(0.01, self.session.capture_interval_seconds)
+    async def trigger_capture(
+        self,
+        reason: str = "layer_change",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Path]:
+        """Trigger an immediate capture (e.g. layer change) with debounce cooldown."""
+        if not self._running or self._paused:
+            return None
+        now = time.monotonic()
+        if (now - self._last_capture_mono) < self._min_trigger_cooldown:
+            logger.debug("Debouncing trigger_capture for session %s (%s)", self.session.id, reason)
+            return None
+        return await self._capture_one_frame(reason=reason, metadata=metadata)
 
-        while self._running:
-            if self._paused:
-                await asyncio.sleep(min(0.2, interval))
-                continue
+    async def _capture_one_frame(
+        self,
+        reason: str = "interval",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Path]:
+        """Execute a single frame capture, save frame, and log metadata to frames.jsonl."""
+        async with self._lock:
+            if not self._running or self._paused:
+                return None
 
-            t0 = time.monotonic()
             try:
                 frame_bytes = await self.camera.capture()
+                self._last_capture_mono = time.monotonic()
 
                 # Camera recovered from a prior outage
                 if not self._camera_online:
@@ -124,10 +145,23 @@ class FrameCaptureWorker:
                 self.session.frame_count = sequence
                 self.session.updated_at = utc_now()
 
+                # Record frame metadata sidecar (frames.jsonl)
+                frame_rec: Dict[str, Any] = {
+                    "frame": sequence,
+                    "filename": f"{sequence:06d}.jpg",
+                    "timestamp": utc_now().isoformat(),
+                    "reason": reason,
+                    "size_bytes": len(frame_bytes),
+                }
+                if metadata:
+                    frame_rec.update(metadata)
+                self.storage.append_frame_metadata(session_dir, frame_rec)
+
                 logger.debug(
-                    "Captured timelapse frame %06d for %s (size: %d bytes)",
+                    "Captured timelapse frame %06d for %s (reason: %s, size: %d bytes)",
                     sequence,
                     self.session.id,
+                    reason,
                     len(frame_bytes),
                 )
 
@@ -137,8 +171,10 @@ class FrameCaptureWorker:
                     except Exception as cb_exc:
                         logger.debug("Error in on_frame_captured callback: %s", cb_exc)
 
+                return saved_path
+
             except asyncio.CancelledError:
-                break
+                raise
             except (CameraError, Exception) as exc:
                 self.session.missed_frames += 1
                 if self._camera_online:
@@ -158,6 +194,25 @@ class FrameCaptureWorker:
                             await self.on_degraded(err_msg)
                         except Exception as cb_exc:
                             logger.debug("Error in on_degraded callback: %s", cb_exc)
+                return None
+
+    async def _capture_loop(self) -> None:
+        """Main capture loop executing non-blocking periodic snapshots."""
+        interval = max(0.01, self.session.capture_interval_seconds)
+
+        while self._running:
+            if self._paused:
+                await asyncio.sleep(min(0.2, interval))
+                continue
+
+            if self.mode == "layer":
+                # In layer-only mode, capture is primarily event-driven.
+                # Use a 5-minute safety heartbeat interval.
+                await asyncio.sleep(1.0)
+                continue
+
+            t0 = time.monotonic()
+            await self._capture_one_frame(reason="interval")
 
             elapsed = time.monotonic() - t0
             sleep_time = max(0.001, interval - elapsed)
@@ -165,3 +220,4 @@ class FrameCaptureWorker:
                 await asyncio.sleep(sleep_time)
             except asyncio.CancelledError:
                 break
+

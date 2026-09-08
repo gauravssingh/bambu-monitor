@@ -120,3 +120,29 @@ class TimelapseStorage:
         test_dir = self.base_dir / "test"
         test_dir.mkdir(parents=True, exist_ok=True)
         return test_dir
+
+    def append_frame_metadata(self, session_dir: Path | str, record: dict) -> Path:
+        """Append a JSON metadata line to frames.jsonl for visual dataset history."""
+        target_file = Path(session_dir) / "frames.jsonl"
+        with open(target_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        return target_file
+
+    def read_frames_metadata(self, session_dir: Path | str, limit: Optional[int] = None) -> List[dict]:
+        """Read records from frames.jsonl if present."""
+        target_file = Path(session_dir) / "frames.jsonl"
+        if not target_file.is_file():
+            return []
+        records = []
+        with open(target_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        continue
+        if limit:
+            return records[:limit]
+        return records
+

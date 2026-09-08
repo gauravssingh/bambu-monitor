@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from starlette.responses import FileResponse, StreamingResponse
+from starlette.responses import FileResponse, HTMLResponse, StreamingResponse
 
 from bambu_monitor.camera import (
     CameraCaptureError,
@@ -386,6 +386,85 @@ async def list_timelapses(
     return [s.model_dump() for s in sessions]
 
 
+@router.get("/api/v1/printers/{printer_id}/timelapses/gallery", response_class=HTMLResponse)
+async def view_timelapse_gallery(
+    printer_id: str,
+    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
+) -> HTMLResponse:
+    """Render a responsive HTML card gallery for all timelapses recorded for a printer."""
+    sessions = await timelapse_repo.list_sessions_for_printer(printer_id, limit=50)
+
+    cards_html = ""
+    for s in sessions:
+        view_url = f"/api/v1/printers/{printer_id}/timelapses/{s.id}/view"
+        download_url = f"/api/v1/printers/{printer_id}/timelapses/{s.id}/video"
+        status_color = "#10b981" if s.status.value == "completed" else ("#f59e0b" if s.status.value in ("capturing", "paused") else "#ef4444")
+        cards_html += f"""
+        <div class="card">
+          <div class="card-header">
+            <div style="font-weight: 600; font-size: 0.95rem; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">{s.id}</div>
+            <span class="badge" style="background-color: {status_color}22; color: {status_color}; border: 1px solid {status_color}55;">{s.status.value}</span>
+          </div>
+          <div class="card-content">
+            <div class="card-detail"><span>Print Job:</span> <strong>{s.print_job_id}</strong></div>
+            <div class="card-detail"><span>Started:</span> {s.started_at.strftime('%Y-%m-%d %H:%M')}</div>
+            <div class="card-detail"><span>Frames:</span> {s.frame_count:,} ({s.video_fps} FPS)</div>
+          </div>
+          <div class="card-actions">
+            <a href="{view_url}" class="btn btn-primary" style="flex: 1; text-align: center; justify-content: center;">Watch Timelapse</a>
+            <a href="{download_url}" download class="btn" title="Download MP4">&darr;</a>
+          </div>
+        </div>
+        """
+
+    if not cards_html:
+        cards_html = '<div style="grid-column: 1/-1; text-align: center; padding: 3rem; color: #94a3b8;">No timelapses recorded yet for this printer.</div>'
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Timelapse Gallery — {printer_id} | Bambu Monitor</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ background-color: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; padding: 2rem 1rem; }}
+    .container {{ max-width: 1080px; margin: 0 auto; }}
+    header {{ margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.5rem; }}
+    .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; overflow: hidden; display: flex; flex-direction: column; }}
+    .card-header {{ padding: 1rem; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }}
+    .badge {{ display: inline-block; padding: 0.2rem 0.5rem; border-radius: 9999px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; }}
+    .card-content {{ padding: 1rem; flex: 1; }}
+    .card-detail {{ font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.4rem; display: flex; justify-content: space-between; }}
+    .card-detail strong {{ color: #f8fafc; }}
+    .card-actions {{ padding: 0.75rem 1rem; background: #0f172a55; border-top: 1px solid #334155; display: flex; gap: 0.5rem; }}
+    a.btn {{ display: inline-flex; align-items: center; gap: 0.5rem; background: #1e293b; color: #f8fafc; padding: 0.4rem 0.75rem; border-radius: 0.375rem; text-decoration: none; border: 1px solid #334155; font-size: 0.8rem; font-weight: 500; transition: background 0.15s; }}
+    a.btn:hover {{ background: #334155; }}
+    a.btn-primary {{ background: #2563eb; border-color: #3b82f6; }}
+    a.btn-primary:hover {{ background: #1d4ed8; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1 style="font-size: 1.75rem; font-weight: 700;">Timelapse Gallery</h1>
+        <p style="color: #94a3b8; font-size: 0.875rem;">Printer: <strong>{printer_id}</strong> &bull; {len(sessions)} recorded sessions</p>
+      </div>
+      <a href="/api/v1/printers" class="btn">&larr; API Status</a>
+    </header>
+
+    <div class="grid">
+      {cards_html}
+    </div>
+  </div>
+</body>
+</html>
+"""
+    return HTMLResponse(content=html)
+
+
 @router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}")
 async def get_timelapse(
     printer_id: str,
@@ -492,3 +571,121 @@ async def get_timelapse_frame(
         )
 
     return FileResponse(path=str(frame_path), media_type="image/jpeg")
+
+
+@router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/metadata")
+async def get_timelapse_metadata(
+    printer_id: str,
+    timelapse_id: str,
+    limit: Optional[int] = Query(default=None, ge=1),
+    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
+    timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
+) -> List[Dict[str, Any]]:
+    """Retrieve frame-by-frame visual history metadata (frames.jsonl) for a session."""
+    session = await timelapse_repo.get_session(timelapse_id)
+    if not session or session.printer_id != printer_id:
+        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+
+    return timelapse_storage.read_frames_metadata(session.storage_dir, limit=limit)
+
+
+@router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/view", response_class=HTMLResponse)
+async def view_timelapse_html(
+    printer_id: str,
+    timelapse_id: str,
+    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
+    timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
+) -> HTMLResponse:
+    """Render a dedicated, responsive HTML5 player interface for viewing the timelapse video."""
+    session = await timelapse_repo.get_session(timelapse_id)
+    if not session or session.printer_id != printer_id:
+        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+
+    video_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/video"
+    gallery_url = f"/api/v1/printers/{printer_id}/timelapses/gallery"
+    status_color = "#10b981" if session.status.value == "completed" else ("#f59e0b" if session.status.value in ("capturing", "paused") else "#ef4444")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Timelapse — {session.id} | Bambu Monitor</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ background-color: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; padding: 2rem 1rem; }}
+    .container {{ max-width: 960px; margin: 0 auto; }}
+    header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }}
+    a.btn, button.btn {{ display: inline-flex; align-items: center; gap: 0.5rem; background: #1e293b; color: #f8fafc; padding: 0.5rem 1rem; border-radius: 0.5rem; text-decoration: none; border: 1px solid #334155; font-size: 0.875rem; font-weight: 500; transition: background 0.15s; cursor: pointer; }}
+    a.btn:hover {{ background: #334155; }}
+    a.btn-primary {{ background: #2563eb; border-color: #3b82f6; }}
+    a.btn-primary:hover {{ background: #1d4ed8; }}
+    .badge {{ display: inline-block; padding: 0.25rem 0.65rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; background-color: {status_color}22; color: {status_color}; border: 1px solid {status_color}55; }}
+    .video-card {{ background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; overflow: hidden; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }}
+    video {{ width: 100%; max-height: 600px; display: block; background: #000; }}
+    .card-body {{ padding: 1.5rem; }}
+    .title-row {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }}
+    .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #334155; }}
+    .stat-box {{ background: #0f172a; padding: 0.75rem 1rem; border-radius: 0.5rem; border: 1px solid #1e293b; }}
+    .stat-label {{ font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; font-weight: 600; margin-bottom: 0.25rem; }}
+    .stat-value {{ font-size: 1.125rem; font-weight: 700; color: #f8fafc; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1 style="font-size: 1.5rem; font-weight: 700;">Print Timelapse</h1>
+        <p style="color: #94a3b8; font-size: 0.875rem;">Printer: <strong>{printer_id}</strong> &bull; Job: {session.print_job_id}</p>
+      </div>
+      <div style="display: flex; gap: 0.5rem;">
+        <a href="{gallery_url}" class="btn">&larr; All Timelapses</a>
+        <a href="{video_url}" download class="btn btn-primary">&darr; Download MP4</a>
+      </div>
+    </header>
+
+    <div class="video-card">
+      <video controls autoplay loop playsinline>
+        <source src="{video_url}" type="video/mp4">
+        Your browser does not support HTML5 video playback.
+      </video>
+      <div class="card-body">
+        <div class="title-row">
+          <div>
+            <h2 style="font-size: 1.125rem; font-weight: 600;">{session.id}</h2>
+            <p style="font-size: 0.8rem; color: #64748b;">Started: {session.started_at.strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
+          </div>
+          <span class="badge">{session.status.value}</span>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-box">
+            <div class="stat-label">Frames</div>
+            <div class="stat-value">{session.frame_count:,}</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Framerate</div>
+            <div class="stat-value">{session.video_fps} FPS</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Interval</div>
+            <div class="stat-value">{session.capture_interval_seconds}s</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Paused Time</div>
+            <div class="stat-value">{int(session.paused_seconds)}s</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Missed Frames</div>
+            <div class="stat-value">{session.missed_frames}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+    return HTMLResponse(content=html)
+
+

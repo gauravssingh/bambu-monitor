@@ -144,3 +144,51 @@ async def test_worker_camera_failure_and_recovery(tmp_path: Path):
     assert len(recovered_events) >= 1
     # After recovery, session should be CAPTURING again
     assert session.status == TimelapseStatus.CAPTURING
+
+
+@pytest.mark.asyncio
+async def test_worker_layer_trigger_and_metadata_sidecar(tmp_path: Path):
+    storage = TimelapseStorage(base_dir=tmp_path)
+    session_dir = tmp_path / "session_worker_trigger"
+    session = TimelapseSession.create(
+        printer_id="printer-1",
+        print_job_id="job-trigger",
+        capture_interval_seconds=10.0,
+        storage_dir=str(session_dir),
+    )
+
+    mock_camera = AsyncMock()
+    mock_camera.capture.return_value = MINI_JPEG
+
+    worker = FrameCaptureWorker(
+        session=session,
+        camera=mock_camera,
+        storage=storage,
+        mode="layer",
+    )
+    worker.start()
+
+    # In layer mode, periodic timer does not capture every tick
+    await asyncio.sleep(0.05)
+    assert session.frame_count == 0
+
+    # Explicit trigger_capture on layer change
+    res1 = await worker.trigger_capture(reason="layer_change", metadata={"layer": 10, "progress": 15.0})
+    assert res1 is not None
+    assert session.frame_count == 1
+
+    # Immediate trigger should be debounced
+    res_debounced = await worker.trigger_capture(reason="layer_change", metadata={"layer": 10})
+    assert res_debounced is None
+    assert session.frame_count == 1
+
+    await worker.stop()
+
+    # Verify frames.jsonl was written
+    records = storage.read_frames_metadata(session_dir)
+    assert len(records) == 1
+    assert records[0]["frame"] == 1
+    assert records[0]["reason"] == "layer_change"
+    assert records[0]["layer"] == 10
+    assert records[0]["progress"] == 15.0
+

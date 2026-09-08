@@ -208,3 +208,18 @@ async def test_full_timelapse_lifecycle_pipeline(tmp_path: Path):
     assert manifest is not None
     assert manifest.status == "completed"
     assert manifest.frame_count >= 2
+
+    # Verify frames.jsonl sidecar records
+    metadata_records = storage.read_frames_metadata(saved_session.storage_dir)
+    assert len(metadata_records) >= 2
+    assert metadata_records[0]["frame"] == 1
+    assert "filename" in metadata_records[0]
+
+    # Verify outbox delivery queue has timelapse.completed with timelapse_video_url for Hermes
+    outbox_messages = await outbox_repo.list_pending(printer_id, limit=50)
+    tl_completed_msg = next((m for m in outbox_messages if m.payload.get("event_type") == "timelapse.completed"), None)
+    assert tl_completed_msg is not None
+    evt_payload = tl_completed_msg.payload.get("payload", {})
+    assert "timelapse_video_url" in evt_payload
+    assert f"/timelapses/{session.id}/video" in evt_payload["timelapse_video_url"]
+

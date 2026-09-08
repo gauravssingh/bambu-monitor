@@ -140,6 +140,15 @@ class StateManager:
                     f"{base_url}/api/v1/printers/{event.printer_id}/camera/snapshot",
                 )
 
+        if event.event_type == "timelapse.completed":
+            base_url = self.settings.application.public_base_url.rstrip("/")
+            session_id = event.payload.get("session_id")
+            if session_id:
+                event.payload.setdefault(
+                    "timelapse_video_url",
+                    f"{base_url}/api/v1/printers/{event.printer_id}/timelapses/{session_id}/video",
+                )
+
         # 1. Persist event and enqueue delivery in one SQLite transaction.
         destination = self.settings.events.delivery.endpoint
         await self.event_repo.save_and_enqueue(event, destination)
@@ -330,6 +339,23 @@ class StateManager:
                             timestamp=patch.timestamp,
                         )
                         generated_events.append(cleared_evt)
+
+                # Emit print.layer_changed event when layer advances
+                if active_job.layer > prev_layer:
+                    layer_evt = DomainEvent.create(
+                        printer_id=printer_id,
+                        event_type="print.layer_changed",
+                        severity=EventSeverity.INFO,
+                        payload={
+                            "job_id": active_job.id,
+                            "layer": active_job.layer,
+                            "prev_layer": prev_layer,
+                            "total_layers": active_job.total_layers,
+                            "progress": active_job.progress,
+                        },
+                        timestamp=patch.timestamp,
+                    )
+                    generated_events.append(layer_evt)
 
                 # State transitions for active job
                 if state.state == PrinterState.PRINTING and active_job.status == JobStatus.PREPARE:

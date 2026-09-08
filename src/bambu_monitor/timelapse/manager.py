@@ -131,11 +131,32 @@ class TimelapseManager:
         elif event_type == "print.resumed":
             await self.on_print_resumed(printer_id, payload)
 
+        elif event_type == "print.layer_changed":
+            await self.on_print_layer_changed(printer_id, payload)
+
         elif event_type == "print.completed":
             await self.on_print_completed(printer_id, payload)
 
         elif event_type == "print.failed":
             await self.on_print_failed(printer_id, payload)
+
+    async def on_print_layer_changed(
+        self,
+        printer_id: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Trigger layer-based frame capture if layer or hybrid mode is active."""
+        worker = self._workers.get(printer_id)
+        if not worker or not worker.is_running or worker.is_paused:
+            return
+        cfg = self.settings.get_timelapse_config(printer_id)
+        if cfg.capture.mode in ("layer", "hybrid"):
+            layer = (payload or {}).get("layer")
+            progress = (payload or {}).get("progress")
+            await worker.trigger_capture(
+                reason="layer_change",
+                metadata={"layer": layer, "progress": progress},
+            )
 
     async def on_print_started(
         self,
@@ -227,10 +248,12 @@ class TimelapseManager:
             self.storage.save_manifest(session)
             await self._emit_timelapse_event(printer_id, "timelapse.resumed", EventSeverity.INFO, session)
 
+        cfg = self.settings.get_timelapse_config(printer_id)
         worker = FrameCaptureWorker(
             session=session,
             camera=camera,
             storage=self.storage,
+            mode=cfg.capture.mode,
             on_frame_captured=on_frame,
             on_degraded=on_degraded,
             on_recovered=on_recovered,

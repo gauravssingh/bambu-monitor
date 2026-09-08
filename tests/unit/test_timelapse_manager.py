@@ -255,3 +255,38 @@ async def test_print_failed_finalizes_and_preserves_frames(setup_manager):
     saved_session = await repo.get_session(session.id)
     assert saved_session.status == TimelapseStatus.FAILED
     assert any(e.event_type == "timelapse.failed" for e in setup_manager["events"])
+
+
+@pytest.mark.asyncio
+async def test_print_layer_changed_triggers_capture(setup_manager):
+    m: TimelapseManager = setup_manager["manager"]
+    # Configure hybrid mode directly on settings
+    m.settings.timelapse.capture.mode = "hybrid"
+
+    evt_start = DomainEvent.create(
+        printer_id="printer-1",
+        event_type="print.started",
+        severity=EventSeverity.INFO,
+        payload={"job_id": "job-layer-test", "filename": "layer.3mf"},
+    )
+    await m.handle_domain_event(evt_start)
+
+    worker = m._workers.get("printer-1")
+    assert worker is not None
+
+    with patch.object(worker, "trigger_capture", new_callable=AsyncMock) as mock_trigger:
+        evt_layer = DomainEvent.create(
+            printer_id="printer-1",
+            event_type="print.layer_changed",
+            severity=EventSeverity.INFO,
+            payload={"job_id": "job-layer-test", "layer": 5, "progress": 10.0},
+        )
+        await m.handle_domain_event(evt_layer)
+
+        mock_trigger.assert_awaited_once_with(
+            reason="layer_change",
+            metadata={"layer": 5, "progress": 10.0},
+        )
+
+    await m.shutdown()
+

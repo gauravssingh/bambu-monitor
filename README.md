@@ -2,7 +2,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 109 Passed](https://img.shields.io/badge/tests-109%20passed-brightgreen.svg)]()
+[![Tests: 112 Passed](https://img.shields.io/badge/tests-112%20passed-brightgreen.svg)]()
 [![Architecture: Phase 1--4 Complete](https://img.shields.io/badge/architecture-Phase%201--4%20Complete-blueviolet.svg)]()
 [![Database: SQLite WAL](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)]()
 
@@ -214,10 +214,11 @@ events:
       "filament.runout_cleared",
       "print.possible_blockage",
       "print.blockage_cleared",
-      "print.started"
+      "print.started",
+      "timelapse.completed"
     ],
     "secret": "bambu-secret-8f92a4e7c10b42d591",
-    "prompt": "Bambu 3D Printer Event: {event_type}\nPrinter: {source}\nSeverity: {severity}\n\nEvent details:\n{__raw__}\n\nFor alert-like events, download the fresh snapshot from {camera_snapshot_url} and send it to Telegram using MEDIA:/tmp/bambu_alert.jpg. Then send a concise, clear status update.",
+    "prompt": "Bambu 3D Printer Event: {event_type}\nPrinter: {source}\nSeverity: {severity}\n\nEvent details:\n{__raw__}\n\nFor alert-like events, download the fresh snapshot from {camera_snapshot_url} and send it to Telegram using MEDIA:/tmp/bambu_alert.jpg.\nFor timelapse.completed events, download the finished MP4 video from {timelapse_video_url} and deliver it to Telegram as MEDIA:/tmp/timelapse.mp4 announcing that the print timelapse video is ready!",
     "deliver": "telegram",
     "deliver_extra": {
       "chat_id": "1117425083"
@@ -277,9 +278,12 @@ Base URL: `http://localhost:8000`
 * `POST /api/v1/printers/{printer_id}/alerts/{alert_id}/acknowledge` — Transition alert from `ACTIVE` → `ACKNOWLEDGED`.
 
 ### Timelapses
-* `GET /api/v1/printers/{printer_id}/timelapses` — List all recorded timelapse sessions.
-* `GET /api/v1/printers/{printer_id}/timelapses/{session_id}` — Detailed session status, pause records, and manifest.
+* `GET /api/v1/printers/{printer_id}/timelapses/gallery` — Dedicated responsive HTML card gallery for browsing all timelapses recorded for a printer.
+* `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/view` — Interactive HTML5 video player and print statistics interface.
+* `GET /api/v1/printers/{printer_id}/timelapses` — List all recorded timelapse sessions (JSON).
+* `GET /api/v1/printers/{printer_id}/timelapses/{session_id}` — Detailed session status, pause records, and manifest (JSON).
 * `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/video` — Stream or download the generated MP4 video file (`video/mp4`).
+* `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/metadata` — Query frame-by-frame visual history sidecar records (`frames.jsonl`).
 * `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/frames` — List captured frame indices and retrieval URLs.
 * `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/frames/{sequence}` — Retrieve an individual JPEG frame (`image/jpeg`).
 
