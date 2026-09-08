@@ -57,7 +57,9 @@ def parse_discovery_packet(data: bytes, sender_ip: str) -> Optional[DiscoveredPr
     for line in lines:
         if ":" in line:
             k, v = line.split(":", 1)
-            fields[k.strip().lower()] = v.strip()
+            clean_key = k.strip().lower()
+            clean_key = re.sub(r"\.bambu\.com$", "", clean_key)
+            fields[clean_key] = v.strip()
 
     serial = fields.get("devid") or fields.get("serial") or fields.get("usn")
     if serial:
@@ -66,13 +68,26 @@ def parse_discovery_packet(data: bytes, sender_ip: str) -> Optional[DiscoveredPr
         ip = fields.get("location") or fields.get("ip") or sender_ip
         # Location may be ip:port or http://ip:port
         ip = re.sub(r"^http[s]?://", "", ip).split(":")[0]
-        model = fields.get("devmodel") or fields.get("model") or "A1"
-        name = fields.get("devname") or fields.get("name") or "Bambu Printer"
+        raw_model = fields.get("devmodel") or fields.get("model") or "A1"
+        model_map = {
+            "n1": "A1 Mini",
+            "n2": "A1",
+            "n2s": "A1",
+            "c11": "P1P",
+            "c12": "P1S",
+            "bl-p001": "X1-Carbon",
+            "x1": "X1-Carbon",
+            "x1c": "X1-Carbon",
+        }
+        model = model_map.get(raw_model.lower(), raw_model)
+        name = fields.get("devname") or fields.get("name") or f"Bambu {model}"
+        connect_type = fields.get("devconnect") or "lan"
         return DiscoveredPrinter(
             serial=serial,
             ip=ip,
             model=model,
             name=name,
+            connect_type=connect_type,
         )
 
     return None
@@ -92,7 +107,7 @@ class DiscoveryProtocol(asyncio.DatagramProtocol):
             self.on_device_found(printer)
 
 
-async def discover_printers(timeout_seconds: float = 3.0) -> List[DiscoveredPrinter]:
+async def discover_printers(timeout_seconds: float = 12.0) -> List[DiscoveredPrinter]:
     """Scan local network for Bambu Lab printers by listening on port 2021 and sending probes."""
     loop = asyncio.get_running_loop()
     discovered: Dict[str, DiscoveredPrinter] = {}

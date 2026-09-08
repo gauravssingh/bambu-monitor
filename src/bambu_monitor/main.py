@@ -73,8 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     disc_parser.add_argument(
         "-t", "--timeout",
         type=float,
-        default=3.0,
-        help="Discovery timeout in seconds (default: 3.0)",
+        default=12.0,
+        help="Discovery timeout in seconds (default: 12.0)",
     )
 
     # 3. onboard

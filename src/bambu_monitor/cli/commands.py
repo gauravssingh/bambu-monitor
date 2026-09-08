@@ -42,9 +42,9 @@ def get_db_and_repos(settings: Settings):
     return db, p_repo, j_repo, a_repo, o_repo
 
 
-async def cmd_discover(timeout: float = 3.0) -> None:
+async def cmd_discover(timeout: float = 12.0) -> None:
     """Discover Bambu Lab printers on the local network."""
-    print("\nSearching for Bambu printers on the local network...")
+    print(f"\nSearching for Bambu printers on the local network (listening up to {int(timeout)}s for heartbeat broadcasts)...")
     printers = await discover_printers(timeout_seconds=timeout)
 
     if not printers:
@@ -100,8 +100,8 @@ async def cmd_onboard(
             name=name or f"Bambu {model or 'A1'}",
         )
     else:
-        print("\nSearching for Bambu printers on the local network...")
-        discovered = await discover_printers(timeout_seconds=3.0)
+        print("\nSearching for Bambu printers on the local network (listening up to 12s)...")
+        discovered = await discover_printers(timeout_seconds=12.0)
 
         if not discovered:
             print("\nNo printers found automatically via discovery.")
