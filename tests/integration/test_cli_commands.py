@@ -64,7 +64,8 @@ async def test_cmd_doctor_output(test_settings: Settings, capsys):
 @pytest.mark.asyncio
 async def test_cmd_onboard_automated(test_settings: Settings, repositories, capsys):
     # Mock test_printer_connection to simulate successful handshake
-    with patch("bambu_monitor.cli.commands.test_printer_connection", new_callable=AsyncMock) as mock_conn:
+    with patch("bambu_monitor.cli.commands.test_printer_connection", new_callable=AsyncMock) as mock_conn, \
+         patch("bambu_monitor.cli.commands.store_access_code"):
         mock_conn.return_value = True
 
         await cmd_onboard(
@@ -142,11 +143,12 @@ async def test_discovery_onboarding_and_dhcp_ip_tracking(test_settings: Settings
 
     initial_ip = "192.168.68.57"
     new_dhcp_ip = "192.168.68.105"
-    serial = "0309DA572602482"
+    serial = "0309TEST9999000"
 
     # Step 1: Discover and onboard with realistic LAN IP
     with patch("bambu_monitor.cli.commands.discover_printers", new_callable=AsyncMock) as mock_disc, \
-         patch("bambu_monitor.cli.commands.test_printer_connection", new_callable=AsyncMock) as mock_conn:
+         patch("bambu_monitor.cli.commands.test_printer_connection", new_callable=AsyncMock) as mock_conn, \
+         patch("bambu_monitor.cli.commands.store_access_code") as mock_store:
 
         mock_disc.return_value = [
             DiscoveredPrinter(serial=serial, ip=initial_ip, model="A1", name="Bambu A1")

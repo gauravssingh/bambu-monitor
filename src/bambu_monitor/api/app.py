@@ -33,11 +33,11 @@ async def _periodic_state_flusher(state_manager: StateManager, settings: Setting
     try:
         while True:
             await asyncio.sleep(interval)
-            for printer_cfg in settings.printers:
+            for printer_id in list(state_manager._states.keys()):
                 try:
-                    await state_manager.flush_state_to_db(printer_cfg.id)
+                    await state_manager.flush_state_to_db(printer_id)
                 except Exception as exc:
-                    logger.debug("Periodic state flush error: %s", exc)
+                    logger.debug("Periodic state flush error for %s: %s", printer_id, exc)
     except asyncio.CancelledError:
         pass
 

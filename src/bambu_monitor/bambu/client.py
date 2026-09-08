@@ -62,15 +62,20 @@ class BambuMqttClient:
         return stored or ""
 
     def _setup_client(self) -> mqtt.Client:
+        import uuid
+        instance_id = uuid.uuid4().hex[:6]
+        cid = f"bambu_monitor_{self.printer_id}_{instance_id}"
+
         # Support paho-mqtt v2 CallbackAPIVersion if available
         if hasattr(mqtt, "CallbackAPIVersion"):
             client = mqtt.Client(
                 mqtt.CallbackAPIVersion.VERSION2,
-                client_id=f"bambu_monitor_{self.printer_id}",
+                client_id=cid,
             )
         else:
-            client = mqtt.Client(client_id=f"bambu_monitor_{self.printer_id}")
+            client = mqtt.Client(client_id=cid)
 
+        client.reconnect_delay_set(min_delay=1, max_delay=15)
         client.username_pw_set(BAMBU_LAN_USERNAME, self.get_password())
 
         # Configure TLS
@@ -169,8 +174,15 @@ class BambuMqttClient:
         self._stopped = False
         self._client = self._setup_client()
         try:
-            self._client.connect_async(self.host, self.port, keepalive=60)
+            logger.info("Connecting to Bambu MQTT %s:%d for %s (access_code length: %d)...", self.host, self.port, self.printer_id, len(self.get_password()))
+            try:
+                self._client.connect(self.host, self.port, keepalive=60)
+                logger.info("TCP/TLS connection to %s:%d established", self.host, self.port)
+            except Exception as conn_err:
+                logger.warning("Direct connect attempt reported: %s; starting async retry loop", conn_err)
+                self._client.connect_async(self.host, self.port, keepalive=60)
             self._client.loop_start()
+            logger.info("Started background MQTT network loop for %s", self.printer_id)
         except Exception as exc:
             logger.error("Failed connecting to Bambu MQTT (%s:%d): %s", self.host, self.port, exc)
 

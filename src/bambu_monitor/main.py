@@ -17,12 +17,22 @@ from bambu_monitor.cli.commands import (
     cmd_onboard,
     cmd_reconnect,
     cmd_remove,
+    cmd_service_logs,
+    cmd_service_restart,
+    cmd_service_start,
+    cmd_service_status,
+    cmd_service_stop,
     cmd_status,
 )
 from bambu_monitor.config import load_config
 
 
 def setup_logging(log_level: str = "INFO") -> None:
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     numeric_level = getattr(logging, log_level.upper(), logging.INFO)
     logging.basicConfig(
         level=numeric_level,
@@ -106,6 +116,26 @@ def build_parser() -> argparse.ArgumentParser:
     rem_parser = subparsers.add_parser("remove", help="Remove a printer and purge stored credentials")
     rem_parser.add_argument("printer_id", help="ID of printer to remove")
 
+    # 10. service
+    svc_parser = subparsers.add_parser("service", help="Manage background daemon service (start, stop, restart, status, logs)")
+    svc_sub = svc_parser.add_subparsers(dest="service_action")
+
+    svc_start = svc_sub.add_parser("start", help="Start Bambu Monitor daemon in background")
+    svc_start.add_argument("--host", default="0.0.0.0", help="HTTP server bind host")
+    svc_start.add_argument("--port", type=int, default=8000, help="HTTP server bind port")
+
+    svc_sub.add_parser("stop", help="Stop running background daemon")
+
+    svc_restart = svc_sub.add_parser("restart", help="Restart background daemon")
+    svc_restart.add_argument("--host", default="0.0.0.0", help="HTTP server bind host")
+    svc_restart.add_argument("--port", type=int, default=8000, help="HTTP server bind port")
+
+    svc_status = svc_sub.add_parser("status", help="Check status of background service")
+    svc_status.add_argument("--port", type=int, default=8000, help="HTTP server bind port")
+
+    svc_logs = svc_sub.add_parser("logs", help="View background daemon logs")
+    svc_logs.add_argument("-n", "--lines", type=int, default=50, help="Number of lines to show")
+
     return parser
 
 
@@ -172,6 +202,21 @@ def main() -> None:
 
     elif cmd == "remove":
         asyncio.run(cmd_remove(printer_id=args.printer_id, settings=settings))
+
+    elif cmd == "service":
+        action = getattr(args, "service_action", None)
+        if action == "start":
+            asyncio.run(cmd_service_start(host=args.host, port=args.port, config_path=args.config_path))
+        elif action == "stop":
+            asyncio.run(cmd_service_stop())
+        elif action == "restart":
+            asyncio.run(cmd_service_restart(host=args.host, port=args.port, config_path=args.config_path))
+        elif action == "status":
+            asyncio.run(cmd_service_status(port=args.port))
+        elif action == "logs":
+            cmd_service_logs(lines=args.lines)
+        else:
+            parser.parse_args(["service", "--help"])
 
     else:
         parser.print_help()

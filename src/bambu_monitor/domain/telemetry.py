@@ -148,7 +148,14 @@ class TelemetryPatch(BaseModel):
         if error_code is None and "print_error" in payload:
             error_code = int(payload["print_error"])
 
-        online = payload.get("online")
+        raw_online = payload.get("online")
+        if isinstance(raw_online, bool):
+            online = raw_online
+        elif isinstance(raw_online, dict):
+            # Bambu submodule status dictionary: presence proves printer is online
+            online = True
+        else:
+            online = None
 
         return cls(
             printer_id=printer_id,

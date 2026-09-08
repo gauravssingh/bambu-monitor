@@ -144,6 +144,10 @@ class StateManager:
                 severity = EventSeverity.INFO if patch.online else EventSeverity.WARNING
                 evt = DomainEvent.create(printer_id, event_type, severity, {"online": patch.online}, patch.timestamp)
                 generated_events.append(evt)
+                try:
+                    await self.printer_repo.update_current_state(printer_id, state)
+                except Exception as exc:
+                    logger.debug("Failed updating immediate current state on connection change: %s", exc)
 
             # 2. Temperature patch merge (preserving untouched fields)
             if patch.nozzle_temperature is not None:

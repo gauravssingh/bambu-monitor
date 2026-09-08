@@ -6,6 +6,8 @@ import asyncio
 import getpass
 import json
 import logging
+import os
+from pathlib import Path
 import socket
 import ssl
 import sys
@@ -398,4 +400,166 @@ async def cmd_reconnect(printer_id: str, settings: Optional[Settings] = None) ->
         else:
             print(f"✗ Could not establish TLS connection to {printer.host}:{BAMBU_MQTT_PORT}")
             print("  Check printer power, Wi-Fi connectivity, and LAN Mode settings.")
+
+
+PID_FILE = Path("./data/bambu-monitor.pid")
+LOG_FILE = Path("./data/bambu-monitor.log")
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _get_running_pid() -> Optional[int]:
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text().strip())
+            if _is_pid_alive(pid):
+                return pid
+        except Exception:
+            pass
+    return None
+
+
+async def cmd_service_start(host: str = "0.0.0.0", port: int = 8000, config_path: Optional[str] = None) -> None:
+    """Start Bambu Monitor daemon as a background service."""
+    import subprocess
+    import time
+    import httpx
+
+    existing_pid = _get_running_pid()
+    if existing_pid:
+        print(f"Bambu Monitor is already running (PID {existing_pid}).")
+        print(f"API available at: http://127.0.0.1:{port}")
+        return
+
+    # Ensure log directory exists
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log_fd = open(LOG_FILE, "a", buffering=1)
+
+    cmd = [
+        sys.executable,
+        "-m", "bambu_monitor.main",
+        "run",
+        "--host", host,
+        "--port", str(port),
+    ]
+    if config_path:
+        cmd.extend(["-c", config_path])
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fd,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    PID_FILE.write_text(str(proc.pid))
+
+    print("Starting Bambu Monitor daemon...")
+    # Wait for HTTP server to become responsive
+    healthy = False
+    for _ in range(10):
+        await asyncio.sleep(0.5)
+        if not _is_pid_alive(proc.pid):
+            break
+        try:
+            async with httpx.AsyncClient(timeout=1.0) as client:
+                res = await client.get(f"http://127.0.0.1:{port}/health")
+                if res.status_code == 200:
+                    healthy = True
+                    break
+        except Exception:
+            pass
+
+    if healthy:
+        print(f"✓ Bambu Monitor service started successfully (PID {proc.pid})")
+        print(f"✓ HTTP API listening on http://{host}:{port}")
+        print(f"✓ Log output: {LOG_FILE.resolve()}")
+    elif not _is_pid_alive(proc.pid):
+        print("✗ Service failed to start. Check logs for details:")
+        if LOG_FILE.exists():
+            print(LOG_FILE.read_text()[-1000:])
+    else:
+        print(f"✓ Bambu Monitor background process started (PID {proc.pid})")
+        print(f"  Log output: {LOG_FILE.resolve()}")
+
+
+async def cmd_service_stop() -> None:
+    """Stop running Bambu Monitor daemon."""
+    import signal
+    pid = _get_running_pid()
+    if not pid:
+        print("Bambu Monitor is not running.")
+        if PID_FILE.exists():
+            PID_FILE.unlink(missing_ok=True)
+        return
+
+    print(f"Stopping Bambu Monitor service (PID {pid})...")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+    for _ in range(15):
+        await asyncio.sleep(0.2)
+        if not _is_pid_alive(pid):
+            break
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+    PID_FILE.unlink(missing_ok=True)
+    print("✓ Bambu Monitor service stopped.")
+
+
+async def cmd_service_status(port: int = 8000) -> None:
+    """Check running status of background service."""
+    import httpx
+    pid = _get_running_pid()
+    if not pid:
+        print("Bambu Monitor service: ○ Stopped")
+        return
+
+    print(f"Bambu Monitor service: ● Running (PID {pid})")
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            res = await client.get(f"http://127.0.0.1:{port}/health")
+            if res.status_code == 200:
+                data = res.json()
+                printers = data.get("printers", {}).get("summary", [])
+                online_cnt = sum(1 for p in printers if p.get("online"))
+                print(f"  API Health:   ● Healthy (http://127.0.0.1:{port})")
+                print(f"  Printers:     {len(printers)} registered, {online_cnt} online")
+                for p in printers:
+                    p_state = p.get("state", "unknown")
+                    dot = "●" if p.get("online") else "○"
+                    print(f"    - {p.get('id')} ({p.get('model')}): {dot} {'Online' if p.get('online') else 'Offline'} [{p_state}]")
+    except Exception as exc:
+        print(f"  API Status:   ○ Not responding ({exc})")
+
+
+async def cmd_service_restart(host: str = "0.0.0.0", port: int = 8000, config_path: Optional[str] = None) -> None:
+    """Restart Bambu Monitor daemon."""
+    await cmd_service_stop()
+    await asyncio.sleep(1.0)
+    await cmd_service_start(host=host, port=port, config_path=config_path)
+
+
+def cmd_service_logs(lines: int = 50) -> None:
+    """Display recent logs from the background daemon."""
+    if not LOG_FILE.exists():
+        print(f"No log file found at {LOG_FILE}")
+        return
+
+    content = LOG_FILE.read_text(errors="ignore").splitlines()
+    recent = content[-lines:] if len(content) > lines else content
+    for line in recent:
+        print(line)
+
 
