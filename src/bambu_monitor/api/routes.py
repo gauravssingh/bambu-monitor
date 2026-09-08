@@ -370,6 +370,30 @@ async def get_camera_snapshot(printer_id: str, request: Request) -> Response:
 
 # --- Timelapse Endpoints ---
 
+@router.get("/api/v1/printers/{printer_id}/timelapse/status")
+async def get_printer_timelapse_status(
+    printer_id: str,
+    timelapse_manager: TimelapseManager = Depends(get_timelapse_manager),
+    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
+    printer_repo: PrinterRepository = Depends(get_printer_repo),
+) -> Dict[str, Any]:
+    """Retrieve the current live timelapse capture status for a printer."""
+    printer = await printer_repo.get(printer_id)
+    if not printer:
+        raise HTTPException(status_code=404, detail=f"Printer '{printer_id}' not found")
+
+    active_session = timelapse_manager.get_active_session(printer_id)
+    recent_sessions = await timelapse_repo.list_sessions_for_printer(printer_id, limit=1)
+    latest_session = recent_sessions[0] if recent_sessions else None
+
+    return {
+        "printer_id": printer_id,
+        "is_capturing": bool(active_session and active_session.status.value == "capturing"),
+        "active_session": active_session.model_dump() if active_session else None,
+        "latest_session": latest_session.model_dump() if latest_session else None,
+    }
+
+
 @router.get("/api/v1/printers/{printer_id}/timelapses")
 async def list_timelapses(
     printer_id: str,
@@ -509,6 +533,119 @@ async def get_timelapse_video(
         path=str(video_path),
         media_type="video/mp4",
         filename=f"timelapse_{printer_id}_{session.print_job_id}.mp4",
+    )
+
+
+@router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/stream")
+async def stream_printer_timelapse_video(
+    printer_id: str,
+    timelapse_id: str,
+    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
+    timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
+) -> FileResponse:
+    """Stream the generated MP4 timelapse video directly for HTML5 in-browser playback."""
+    session = await timelapse_repo.get_session(timelapse_id)
+    if not session or session.printer_id != printer_id:
+        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+
+    video_path = timelapse_storage.get_video_path(session.storage_dir)
+    if not video_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Video file for timelapse '{timelapse_id}' has not been generated or was removed",
+        )
+
+    return FileResponse(
+        path=str(video_path),
+        media_type="video/mp4",
+        headers={"Content-Disposition": "inline"},
+    )
+
+
+# --- Global Timelapse Endpoints ---
+
+@router.get("/api/v1/timelapses")
+async def list_all_timelapses(
+    printer_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
+) -> List[Dict[str, Any]]:
+    """List all timelapse sessions across all printers, optionally filtered by printer_id."""
+    if printer_id:
+        sessions = await timelapse_repo.list_sessions_for_printer(printer_id, limit=limit)
+    else:
+        sessions = await timelapse_repo.list_all_sessions(limit=limit)
+    return [s.model_dump() for s in sessions]
+
+
+@router.get("/api/v1/timelapses/{timelapse_id}")
+async def get_timelapse_by_id(
+    timelapse_id: str,
+    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
+    timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
+) -> Dict[str, Any]:
+    """Retrieve details and manifest for a specific timelapse session across all printers."""
+    session = await timelapse_repo.get_session(timelapse_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+
+    pauses = await timelapse_repo.get_pauses_for_session(timelapse_id)
+    manifest = timelapse_storage.load_manifest(session.storage_dir)
+
+    return {
+        "session": session.model_dump(),
+        "pauses": [p.model_dump() for p in pauses],
+        "manifest": manifest.model_dump() if manifest else None,
+    }
+
+
+@router.get("/api/v1/timelapses/{timelapse_id}/video")
+async def get_timelapse_video_by_id(
+    timelapse_id: str,
+    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
+    timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
+) -> FileResponse:
+    """Download the generated MP4 timelapse video by session ID."""
+    session = await timelapse_repo.get_session(timelapse_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+
+    video_path = timelapse_storage.get_video_path(session.storage_dir)
+    if not video_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Video file for timelapse '{timelapse_id}' has not been generated or was removed",
+        )
+
+    return FileResponse(
+        path=str(video_path),
+        media_type="video/mp4",
+        filename=f"timelapse_{session.printer_id}_{session.print_job_id}.mp4",
+    )
+
+
+@router.get("/api/v1/timelapses/{timelapse_id}/stream")
+async def stream_timelapse_video_by_id(
+    timelapse_id: str,
+    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
+    timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
+) -> FileResponse:
+    """Stream the generated MP4 timelapse video by session ID for in-browser playback."""
+    session = await timelapse_repo.get_session(timelapse_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+
+    video_path = timelapse_storage.get_video_path(session.storage_dir)
+    if not video_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Video file for timelapse '{timelapse_id}' has not been generated or was removed",
+        )
+
+    return FileResponse(
+        path=str(video_path),
+        media_type="video/mp4",
+        headers={"Content-Disposition": "inline"},
     )
 
 

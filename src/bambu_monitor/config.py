@@ -8,11 +8,14 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 from bambu_monitor.camera.config import CameraConfig
+
+# Load environment variables from .env file if present
+load_dotenv()
 
 
 def _interpolate_env_vars(raw: str) -> str:
@@ -110,10 +113,22 @@ class TimelapseCameraConfig(BaseModel):
     url: str = Field(default="", description="RTSP URL for timelapse camera")
     stream: str = Field(default="stream1", description="Stream profile, e.g. stream1 HD")
 
+    @field_validator("url", mode="before")
+    @classmethod
+    def _coerce_url(cls, v: object) -> str:
+        return "" if v is None else str(v).strip()
+
 
 class TimelapseCaptureConfig(BaseModel):
     interval_seconds: float = Field(default=5.0, ge=0.01, description="Snapshot interval in seconds")
     mode: str = Field(default="interval", description="Capture mode: interval (V1), layer or hybrid (future)")
+
+
+class TimelapseOverlayConfig(BaseModel):
+    enabled: bool = Field(default=False, description="Whether to burn telemetry HUD directly into video frames")
+    show_temperatures: bool = True
+    show_progress: bool = True
+    show_alerts: bool = True
 
 
 class TimelapseVideoConfig(BaseModel):
@@ -121,6 +136,7 @@ class TimelapseVideoConfig(BaseModel):
     codec: str = Field(default="libx264", description="FFmpeg video codec")
     quality: int = Field(default=18, ge=0, le=51, description="FFmpeg Constant Rate Factor (CRF) quality")
     pixel_format: str = Field(default="yuv420p", description="Pixel format for maximum playback compatibility")
+    max_concurrent: int = Field(default=1, ge=1, le=8, description="Maximum concurrent video render jobs")
 
 
 class TimelapseRetentionConfig(BaseModel):
@@ -135,6 +151,7 @@ class TimelapseConfig(BaseModel):
     camera: TimelapseCameraConfig = Field(default_factory=TimelapseCameraConfig)
     capture: TimelapseCaptureConfig = Field(default_factory=TimelapseCaptureConfig)
     video: TimelapseVideoConfig = Field(default_factory=TimelapseVideoConfig)
+    overlay: TimelapseOverlayConfig = Field(default_factory=TimelapseOverlayConfig)
     retention: TimelapseRetentionConfig = Field(default_factory=TimelapseRetentionConfig)
 
 
@@ -173,6 +190,8 @@ class Settings(BaseSettings):
                 cfg.capture = p_tl.capture.model_copy(deep=True)
             if p_tl.video:
                 cfg.video = p_tl.video.model_copy(deep=True)
+            if hasattr(p_tl, "overlay") and p_tl.overlay:
+                cfg.overlay = p_tl.overlay.model_copy(deep=True)
             if p_tl.retention:
                 cfg.retention = p_tl.retention.model_copy(deep=True)
 

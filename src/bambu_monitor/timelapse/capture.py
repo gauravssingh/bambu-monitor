@@ -206,11 +206,14 @@ class FrameCaptureWorker:
                 return None
 
     async def _capture_loop(self) -> None:
-        """Main capture loop executing non-blocking periodic snapshots."""
+        """Main capture loop executing non-blocking periodic snapshots with exponential backoff on outage."""
         interval = max(0.01, self.session.capture_interval_seconds)
+        consecutive_failures = 0
+        max_backoff = 30.0
 
         while self._running:
             if self._paused:
+                consecutive_failures = 0
                 await asyncio.sleep(min(0.2, interval))
                 continue
 
@@ -221,12 +224,29 @@ class FrameCaptureWorker:
                 continue
 
             t0 = time.monotonic()
-            await self._capture_one_frame(reason="interval")
-
+            saved = await self._capture_one_frame(reason="interval")
             elapsed = time.monotonic() - t0
-            sleep_time = max(0.001, interval - elapsed)
+
+            if saved is not None:
+                consecutive_failures = 0
+                sleep_time = max(0.001, interval - elapsed)
+            else:
+                consecutive_failures += 1
+                # Start exponential backoff after 2 consecutive failures to tolerate transient drops
+                backoff_exp = max(0, min(4, consecutive_failures - 2))
+                backoff_time = min(max_backoff, interval * (2 ** backoff_exp))
+                sleep_time = max(0.001, max(interval, backoff_time) - elapsed)
+                if consecutive_failures > 2:
+                    logger.debug(
+                        "Camera degraded for %s: backoff sleep %.2fs (consecutive failures: %d)",
+                        self.session.id,
+                        sleep_time,
+                        consecutive_failures,
+                    )
+
             try:
                 await asyncio.sleep(sleep_time)
             except asyncio.CancelledError:
                 break
+
 

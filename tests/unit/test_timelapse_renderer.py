@@ -56,8 +56,17 @@ async def test_renderer_success_mock_ffmpeg(tmp_path: Path):
 
     renderer = TimelapseRenderer()
 
-    # Mock FFmpeg process: simulate creating the temp file and exiting with code 0
-    async def fake_ffmpeg(*args, **kwargs):
+    # Mock FFmpeg and ffprobe process
+    async def fake_ffmpeg_and_probe(*args, **kwargs):
+        if "ffprobe" in Path(str(args[0])).name:
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"streams":[{"codec_name":"h264","width":1920,"height":1080,"r_frame_rate":"30/1"}],"format":{"duration":"2.5","size":"1024"}}',
+                b"",
+            )
+            return mock_proc
+
         out_file = Path(args[-1])
         out_file.write_bytes(b"fake mp4 video bytes")
         mock_proc = AsyncMock()
@@ -65,7 +74,7 @@ async def test_renderer_success_mock_ffmpeg(tmp_path: Path):
         mock_proc.communicate.return_value = (b"", b"")
         return mock_proc
 
-    with patch("asyncio.create_subprocess_exec", side_effect=fake_ffmpeg):
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_ffmpeg_and_probe):
         video_path = await renderer.render(session, storage)
         assert video_path.is_file()
         assert video_path.name == "timelapse.mp4"
@@ -134,6 +143,15 @@ async def test_renderer_with_sequence_gaps(tmp_path: Path):
     recorded_args = []
 
     async def fake_ffmpeg(*args, **kwargs):
+        if "ffprobe" in Path(str(args[0])).name:
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"streams":[{"codec_name":"h264","width":1920,"height":1080,"r_frame_rate":"30/1"}],"format":{"duration":"2.5","size":"1024"}}',
+                b"",
+            )
+            return mock_proc
+
         recorded_args.extend(args)
         out_file = Path(args[-1])
         out_file.write_bytes(b"valid video")
@@ -150,3 +168,78 @@ async def test_renderer_with_sequence_gaps(tmp_path: Path):
         # Check that -start_number was set to 1 for the re-sequenced frames
         assert "-start_number" in recorded_args
         assert "1" in recorded_args
+
+
+@pytest.mark.asyncio
+async def test_renderer_ffprobe_missing_video_stream(tmp_path: Path):
+    storage = TimelapseStorage(base_dir=tmp_path)
+    session_dir = tmp_path / "session_no_stream"
+    storage.save_frame(session_dir, 1, MINI_JPEG)
+
+    session = TimelapseSession.create(
+        printer_id="printer-1",
+        print_job_id="job-1",
+        storage_dir=str(session_dir),
+    )
+
+    renderer = TimelapseRenderer()
+
+    async def fake_ffmpeg_no_stream(*args, **kwargs):
+        if "ffprobe" in Path(str(args[0])).name:
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            # Return empty streams list
+            mock_proc.communicate.return_value = (b'{"streams":[],"format":{"duration":"1.0"}}', b"")
+            return mock_proc
+
+        out_file = Path(args[-1])
+        out_file.write_bytes(b"corrupted container")
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = (b"", b"")
+        return mock_proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_ffmpeg_no_stream):
+        with pytest.raises(TimelapseRenderError) as exc_info:
+            await renderer.render(session, storage)
+        assert "no video stream found" in str(exc_info.value)
+        assert session.status == TimelapseStatus.FAILED
+        assert not storage.get_video_path(session_dir).exists()
+
+
+@pytest.mark.asyncio
+async def test_renderer_with_burn_overlay(tmp_path: Path):
+    storage = TimelapseStorage(base_dir=tmp_path)
+    session_dir = tmp_path / "session_overlay"
+    storage.save_frame(session_dir, 1, MINI_JPEG)
+    storage.append_frame_metadata(session_dir, {"frame": 1, "nozzle_temp": 215.0, "progress": 50})
+
+    session = TimelapseSession.create(
+        printer_id="printer-1",
+        print_job_id="job-1",
+        storage_dir=str(session_dir),
+    )
+
+    renderer = TimelapseRenderer()
+
+    async def fake_ffmpeg_overlay(*args, **kwargs):
+        if "ffprobe" in Path(str(args[0])).name:
+            mock_proc = AsyncMock()
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = (
+                b'{"streams":[{"codec_name":"h264","width":1920,"height":1080,"r_frame_rate":"30/1"}],"format":{"duration":"1.0","size":"2048"}}',
+                b"",
+            )
+            return mock_proc
+
+        out_file = Path(args[-1])
+        out_file.write_bytes(b"valid overlaid video")
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = (b"", b"")
+        return mock_proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_ffmpeg_overlay):
+        video_path = await renderer.render(session, storage, burn_overlay=True)
+        assert video_path.is_file()
+        assert session.status == TimelapseStatus.COMPLETED

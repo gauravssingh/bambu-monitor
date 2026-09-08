@@ -24,8 +24,13 @@ from bambu_monitor.bambu.credentials import (
 )
 from bambu_monitor.bambu.discovery import DiscoveredPrinter, discover_printers
 from bambu_monitor.bambu.protocol import BAMBU_DISCOVERY_PORT, BAMBU_LAN_USERNAME, BAMBU_MQTT_PORT
-from bambu_monitor.config import Settings, load_config
-from bambu_monitor.camera import CameraClient, CameraConfig, CameraError, create_camera_client
+from bambu_monitor.camera import (
+    CameraClient,
+    CameraConfig,
+    CameraError,
+    create_camera_client,
+    sanitize_rtsp_url,
+)
 from bambu_monitor.domain.printer import Printer
 from bambu_monitor.storage.database import Database
 from bambu_monitor.storage.repositories import (
@@ -751,14 +756,16 @@ async def cmd_timelapse_camera_test(
         diag = await client.health()
     except Exception as exc:
         print(f"Camera: {cam_label}")
+        print("Status: FAILED")
         print("Connection: FAILED")
-        print(f"Error: {exc}")
+        print(f"Error: {sanitize_rtsp_url(str(exc))}")
         return
 
     if not diag.connected:
         print(f"Camera: {cam_label}")
+        print("Status: FAILED")
         print("Connection: FAILED")
-        print(f"Error: {diag.error}")
+        print(f"Error: {sanitize_rtsp_url(diag.error or 'Connection failed')}")
         return
 
     # 3. Stream availability & Frame capture
@@ -767,17 +774,31 @@ async def cmd_timelapse_camera_test(
         elapsed_ms = (time.perf_counter() - t0) * 1000
     except Exception as exc:
         print(f"Camera: {cam_label}")
+        print("Status: FAILED")
         print("Connection: OK")
         print("Snapshot: FAILED")
-        print(f"Error: {exc}")
+        print(f"Error: {sanitize_rtsp_url(str(exc))}")
         return
 
-    # 4. JPEG validity
-    if not frame_bytes.startswith(b"\xff\xd8"):
+    # 4. JPEG validity & dimensions
+    is_valid_jpeg = frame_bytes.startswith(b"\xff\xd8")
+    if not is_valid_jpeg:
         print(f"Camera: {cam_label}")
+        print("Status: FAILED")
         print("Connection: OK")
         print("Snapshot: FAILED (invalid JPEG marker)")
+        print("JPEG: INVALID")
         return
+
+    # Extract resolution from JPEG if not obtained via ffprobe
+    if not diag.resolution:
+        try:
+            import io
+            from PIL import Image
+            with Image.open(io.BytesIO(frame_bytes)) as img:
+                diag.resolution = f"{img.width}x{img.height}"
+        except Exception:
+            pass
 
     # 5. Output file creation
     storage = TimelapseStorage(base_dir=active_settings.timelapse.storage_dir)
@@ -787,16 +808,19 @@ async def cmd_timelapse_camera_test(
     out_file.write_bytes(frame_bytes)
 
     latency_val = diag.latency_ms if diag.latency_ms is not None else round(elapsed_ms, 1)
+    size_kb = max(1, round(len(frame_bytes) / 1024))
 
     print(f"Camera: {cam_label}")
+    print("Status: CONNECTED")
     print("Connection: OK")
     print(f"Stream: {tl_cfg.camera.stream}")
     print("Snapshot: OK")
     if diag.resolution:
         print(f"Resolution: {diag.resolution}")
     print(f"Latency: {int(latency_val)} ms")
-    print("\nSaved:")
-    print(str(out_file))
+    print("JPEG: VALID")
+    print(f"Size: {size_kb} KB")
+    print(f"Saved: {out_file}")
 
 
 async def cmd_timelapse_status(

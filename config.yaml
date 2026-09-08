@@ -64,9 +64,17 @@ timelapse:
     codec: libx264
     quality: 18
     pixel_format: yuv420p
+    max_concurrent: 1
+  overlay:
+    # Set to true to burn telemetry HUD banner into video frames; false preserves clean camera frames
+    enabled: false
+    show_temperatures: true
+    show_progress: true
+    show_alerts: true
   retention:
     # 'delete_after_video' cleans up frame images once MP4 renders successfully; 'retain' keeps all JPEGs
     successful_frames: delete_after_video
     # Retain frame images for failed or cancelled prints for post-mortem analysis
     failed_frames: retain
     videos_days: 365
+

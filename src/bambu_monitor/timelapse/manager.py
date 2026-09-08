@@ -42,6 +42,7 @@ class TimelapseManager:
         camera_registry: Optional[CameraRegistry] = None,
         renderer: Optional[TimelapseRenderer] = None,
         emit_event_cb: Optional[Callable[[DomainEvent], Awaitable[None]]] = None,
+        state_manager: Optional[Any] = None,
     ) -> None:
         self.settings = settings
         self.repo = timelapse_repo
@@ -49,7 +50,10 @@ class TimelapseManager:
         self.camera_registry = camera_registry or CameraRegistry()
         self.renderer = renderer or TimelapseRenderer()
         self.emit_event_cb = emit_event_cb
+        self.state_manager = state_manager
 
+        max_concurrent = getattr(self.settings.timelapse.video, "max_concurrent", 1)
+        self._render_semaphore = asyncio.Semaphore(max_concurrent)
         self._active_sessions: Dict[str, TimelapseSession] = {}
         self._workers: Dict[str, FrameCaptureWorker] = {}
         self._active_pauses: Dict[str, TimelapsePause] = {}
@@ -390,15 +394,18 @@ class TimelapseManager:
                 await self._emit_timelapse_event(printer_id, "timelapse.failed", EventSeverity.WARNING, session)
                 return
 
-            # Render video
-            video_path = await self.renderer.render(
-                session=session,
-                storage=self.storage,
-                fps=cfg.video.fps,
-                codec=cfg.video.codec,
-                quality=cfg.video.quality,
-                pixel_format=cfg.video.pixel_format,
-            )
+            # Render video with bounded concurrency
+            async with self._render_semaphore:
+                burn_overlay = getattr(cfg.overlay, "enabled", False) if hasattr(cfg, "overlay") else False
+                video_path = await self.renderer.render(
+                    session=session,
+                    storage=self.storage,
+                    fps=cfg.video.fps,
+                    codec=cfg.video.codec,
+                    quality=cfg.video.quality,
+                    pixel_format=cfg.video.pixel_format,
+                    burn_overlay=burn_overlay,
+                )
 
             if is_failed:
                 # Video rendered for failed print; mark session as FAILED per lifecycle
@@ -531,14 +538,17 @@ class TimelapseManager:
             raise TimelapseRenderError(f"Timelapse session not found for ID '{job_or_session_id}'")
 
         cfg = self.settings.get_timelapse_config(session.printer_id)
-        video_path = await self.renderer.render(
-            session=session,
-            storage=self.storage,
-            fps=cfg.video.fps,
-            codec=cfg.video.codec,
-            quality=cfg.video.quality,
-            pixel_format=cfg.video.pixel_format,
-        )
+        async with self._render_semaphore:
+            burn_overlay = getattr(cfg.overlay, "enabled", False) if hasattr(cfg, "overlay") else False
+            video_path = await self.renderer.render(
+                session=session,
+                storage=self.storage,
+                fps=cfg.video.fps,
+                codec=cfg.video.codec,
+                quality=cfg.video.quality,
+                pixel_format=cfg.video.pixel_format,
+                burn_overlay=burn_overlay,
+            )
         session.transition_to(TimelapseStatus.COMPLETED)
         await self.repo.save_session(session)
         self.storage.save_manifest(session)

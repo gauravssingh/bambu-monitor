@@ -167,6 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     tl_test = tl_sub.add_parser("camera-test", help="Verify RTSP camera stream and capture a diagnostic snapshot")
     tl_test.add_argument("printer_id", nargs="?", default=None, help="Optional printer ID")
+    tl_test.add_argument("--printer", dest="printer_flag", default=None, help="Optional printer ID")
 
     tl_gen = tl_sub.add_parser("generate", help="Generate or re-compile MP4 video from existing frames")
     tl_gen.add_argument("job_id", help="Print Job ID or Timelapse Session ID")
@@ -175,6 +176,11 @@ def build_parser() -> argparse.ArgumentParser:
     tl_corr.add_argument("printer_id", help="Printer ID")
     tl_corr.add_argument("timelapse_id", nargs="?", default=None, help="Optional Timelapse Session ID or Print Job ID (defaults to latest)")
     tl_corr.add_argument("--temp-drop-threshold", type=float, default=10.0, help="Temperature drop threshold in °C below target (default: 10.0)")
+
+    # Top-level camera-test alias
+    cam_test_top = subparsers.add_parser("camera-test", help="Verify RTSP camera stream and capture a diagnostic snapshot")
+    cam_test_top.add_argument("printer_id", nargs="?", default=None, help="Optional printer ID")
+    cam_test_top.add_argument("--printer", dest="printer_flag", default=None, help="Optional printer ID")
 
     return parser
 
@@ -274,7 +280,8 @@ def main() -> None:
         elif action == "list":
             asyncio.run(cmd_timelapse_list(printer_id=args.printer_id, limit=args.limit, settings=settings))
         elif action == "camera-test":
-            asyncio.run(cmd_timelapse_camera_test(printer_id=args.printer_id, settings=settings))
+            target_p = getattr(args, "printer_flag", None) or args.printer_id
+            asyncio.run(cmd_timelapse_camera_test(printer_id=target_p, settings=settings))
         elif action == "generate":
             asyncio.run(cmd_timelapse_generate(job_or_session_id=args.job_id, settings=settings))
         elif action == "correlate":
@@ -288,6 +295,10 @@ def main() -> None:
             )
         else:
             parser.parse_args(["timelapse", "--help"])
+
+    elif cmd == "camera-test":
+        target_p = getattr(args, "printer_flag", None) or args.printer_id
+        asyncio.run(cmd_timelapse_camera_test(printer_id=target_p, settings=settings))
 
     else:
         parser.print_help()

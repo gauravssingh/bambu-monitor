@@ -119,6 +119,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         camera_registry=camera_registry,
         renderer=timelapse_renderer,
         emit_event_cb=state_manager._emit_event,
+        state_manager=state_manager,
     )
     state_manager.add_event_listener(timelapse_manager.handle_domain_event)
     state_manager.add_reconcile_listener(timelapse_manager.reconcile_on_startup)

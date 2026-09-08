@@ -599,6 +599,19 @@ class TimelapseRepository:
         finally:
             await conn.close()
 
+    async def list_all_sessions(self, limit: int = 50) -> List[Any]:
+        from bambu_monitor.storage.models import row_to_timelapse_session
+        conn = await self.db.get_connection()
+        try:
+            async with conn.execute(
+                "SELECT * FROM timelapse_sessions ORDER BY started_at DESC LIMIT ?",
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [row_to_timelapse_session(r) for r in rows]
+        finally:
+            await conn.close()
+
     async def save_pause(self, pause: Any) -> int:
         from bambu_monitor.storage.models import format_datetime
         conn = await self.db.get_connection()
