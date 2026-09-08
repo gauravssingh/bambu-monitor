@@ -58,7 +58,8 @@ timelapse:
     url: ${TIMELAPSE_CAMERA_RTSP:}
   capture:
     interval_seconds: 5.0
-    mode: interval
+    # Capture mode: 'layer' (on layer change), 'interval' (periodic time), or 'hybrid' (both)
+    mode: hybrid
   video:
     fps: 30
     codec: libx264
