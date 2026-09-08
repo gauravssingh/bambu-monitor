@@ -70,6 +70,20 @@ class StateManager:
         self._subscribers: Dict[str, Set[asyncio.Queue[DomainEvent]]] = {}
         self._lock = asyncio.Lock()
 
+        # External and subsystem event listeners (e.g. TimelapseManager)
+        self._event_listeners: List[Any] = []
+        self._reconcile_listeners: List[Any] = []
+
+    def add_event_listener(self, listener: Any) -> None:
+        """Register an async callback invoked on every domain event emission."""
+        if listener not in self._event_listeners:
+            self._event_listeners.append(listener)
+
+    def add_reconcile_listener(self, listener: Any) -> None:
+        """Register an async callback invoked on startup reconciliation."""
+        if listener not in self._reconcile_listeners:
+            self._reconcile_listeners.append(listener)
+
     def register_printer(self, printer_id: str, model: str = "A1") -> None:
         """Initialize in-memory state container for a printer."""
         if printer_id not in self._states:
@@ -137,6 +151,13 @@ class StateManager:
                 q.put_nowait(event)
             except Exception as e:
                 logger.debug("Failed to put event into SSE queue: %s", e)
+
+        # 3. Notify internal registered subsystem listeners (e.g. TimelapseManager)
+        for listener in list(self._event_listeners):
+            try:
+                await listener(event)
+            except Exception as exc:
+                logger.debug("Error in event listener for %s: %s", event.event_type, exc)
 
     @staticmethod
     def _job_identity_changed(job: PrintJob, patch: TelemetryPatch) -> bool:
@@ -592,6 +613,14 @@ class StateManager:
                     logger.info("Startup reconciliation: printer is idle; marking orphaned job %s as completed", db_job.id)
                     db_job.transition_to(JobStatus.COMPLETED)
                     await self.job_repo.save(db_job)
+
+            # Notify startup reconciliation listeners (e.g. TimelapseManager)
+            current_active = self._active_jobs.get(printer_id)
+            for rec_listener in list(self._reconcile_listeners):
+                try:
+                    await rec_listener(printer_id, current_active)
+                except Exception as exc:
+                    logger.debug("Error in startup reconciliation listener: %s", exc)
 
     async def flush_state_to_db(self, printer_id: str) -> None:
         """Throttled periodic persistence of in-memory state snapshot."""

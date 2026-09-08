@@ -77,6 +77,46 @@ CREATE TABLE IF NOT EXISTS outbox (
     FOREIGN KEY(printer_id) REFERENCES printers(id)
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_printer_status_id ON outbox(printer_id, status, id);
+
+CREATE TABLE IF NOT EXISTS timelapse_sessions (
+    id TEXT PRIMARY KEY,
+    print_job_id TEXT NOT NULL,
+    printer_id TEXT NOT NULL REFERENCES printers(id),
+    camera_id TEXT NOT NULL DEFAULT 'default',
+    camera_type TEXT NOT NULL DEFAULT 'tapo_rtsp',
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    paused_at TEXT,
+    resumed_at TEXT,
+    completed_at TEXT,
+    frame_count INTEGER NOT NULL DEFAULT 0,
+    missed_frames INTEGER NOT NULL DEFAULT 0,
+    capture_interval_seconds REAL NOT NULL DEFAULT 5.0,
+    video_fps INTEGER NOT NULL DEFAULT 30,
+    video_path TEXT,
+    storage_dir TEXT NOT NULL,
+    error TEXT,
+    paused_seconds REAL NOT NULL DEFAULT 0.0,
+    camera_outage_count INTEGER NOT NULL DEFAULT 0,
+    camera_outage_seconds REAL NOT NULL DEFAULT 0.0,
+    metadata_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(printer_id) REFERENCES printers(id)
+);
+CREATE INDEX IF NOT EXISTS idx_timelapse_sessions_printer ON timelapse_sessions(printer_id);
+CREATE INDEX IF NOT EXISTS idx_timelapse_sessions_job ON timelapse_sessions(print_job_id);
+CREATE INDEX IF NOT EXISTS idx_timelapse_sessions_status ON timelapse_sessions(status);
+
+CREATE TABLE IF NOT EXISTS timelapse_pauses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES timelapse_sessions(id),
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    duration_seconds REAL NOT NULL DEFAULT 0.0,
+    FOREIGN KEY(session_id) REFERENCES timelapse_sessions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_timelapse_pauses_session ON timelapse_pauses(session_id);
 """
 
 

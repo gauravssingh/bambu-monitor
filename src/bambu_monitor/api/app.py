@@ -21,8 +21,10 @@ from bambu_monitor.storage.repositories import (
     JobRepository,
     OutboxRepository,
     PrinterRepository,
+    TimelapseRepository,
 )
-from bambu_monitor.camera import CameraClient, CameraRegistry
+from bambu_monitor.camera import CameraClient, CameraRegistry, create_camera_client
+from bambu_monitor.timelapse import TimelapseManager, TimelapseRenderer, TimelapseStorage
 from bambu_monitor.api.routes import router
 
 logger = logging.getLogger(__name__)
@@ -88,6 +90,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     alert_repo = AlertRepository(db)
     event_repo = EventRepository(db)
     outbox_repo = OutboxRepository(db)
+    timelapse_repo = TimelapseRepository(db)
 
     state_manager = StateManager(
         settings=settings,
@@ -97,6 +100,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         event_repo=event_repo,
         outbox_repo=outbox_repo,
     )
+
+    # Register RTSP cameras if configured
+    camera_registry = CameraRegistry()
+    for p_cfg in settings.printers:
+        if p_cfg.camera and p_cfg.camera.enabled and p_cfg.camera.rtsp_url:
+            cam_client = create_camera_client(config=p_cfg.camera, printer_id=p_cfg.id)
+            camera_registry.register(p_cfg.id, cam_client)
+            logger.info("Configured camera for printer '%s' (%s)", p_cfg.id, cam_client.sanitized_url)
+
+    # Initialize Timelapse subsystem
+    timelapse_storage = TimelapseStorage(base_dir=settings.timelapse.storage_dir)
+    timelapse_renderer = TimelapseRenderer()
+    timelapse_manager = TimelapseManager(
+        settings=settings,
+        timelapse_repo=timelapse_repo,
+        storage=timelapse_storage,
+        camera_registry=camera_registry,
+        renderer=timelapse_renderer,
+        emit_event_cb=state_manager._emit_event,
+    )
+    state_manager.add_event_listener(timelapse_manager.handle_domain_event)
+    state_manager.add_reconcile_listener(timelapse_manager.reconcile_on_startup)
 
     # 1. Register configured printers
     for p_cfg in settings.printers:
@@ -127,6 +152,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.event_repo = event_repo
     app.state.outbox_repo = outbox_repo
     app.state.state_manager = state_manager
+    app.state.camera_registry = camera_registry
+    app.state.timelapse_repo = timelapse_repo
+    app.state.timelapse_storage = timelapse_storage
+    app.state.timelapse_renderer = timelapse_renderer
+    app.state.timelapse_manager = timelapse_manager
 
     # 3. Start MQTT clients if enabled
     mqtt_clients: dict[str, BambuMqttClient] = {}
@@ -155,16 +185,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state.mqtt_clients = mqtt_clients
 
-    # 4. Register RTSP cameras if configured
-    camera_registry = CameraRegistry()
-    for p_cfg in settings.printers:
-        if p_cfg.camera and p_cfg.camera.enabled and p_cfg.camera.rtsp_url:
-            cam_client = CameraClient(config=p_cfg.camera, printer_id=p_cfg.id)
-            camera_registry.register(p_cfg.id, cam_client)
-            logger.info("Configured camera for printer '%s' (%s)", p_cfg.id, cam_client.sanitized_url)
-    app.state.camera_registry = camera_registry
-
-    # 5. Start background tasks
+    # 4. Start background tasks
     flush_task = asyncio.create_task(_periodic_state_flusher(state_manager, settings))
     discovery_task = None
     if settings.application.enable_discovery:
@@ -185,6 +206,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Shutdown
+    await timelapse_manager.shutdown()
     flush_task.cancel()
     if discovery_task:
         discovery_task.cancel()

@@ -273,3 +273,114 @@ def test_camera_registry():
     removed = reg.remove("printer-1")
     assert removed is client
     assert reg.get("printer-1") is None
+
+
+# 10. TapoRTSPCamera & Protocol Conformance
+def test_tapo_and_generic_camera_protocol():
+    from bambu_monitor.camera import (
+        CameraClientProtocol,
+        GenericRTSPCamera,
+        TapoRTSPCamera,
+        create_camera_client,
+    )
+
+    tapo_cfg = CameraConfig(type="tapo_rtsp", rtsp_url="rtsp://admin:pass@192.168.1.50:554/stream1")
+    tapo = TapoRTSPCamera(config=tapo_cfg, printer_id="printer-1")
+    assert isinstance(tapo, CameraClientProtocol)
+    assert tapo.camera_type == "tapo_rtsp"
+
+    generic_cfg = CameraConfig(type="generic_rtsp", rtsp_url="rtsp://admin:pass@192.168.1.60:554/live")
+    generic = GenericRTSPCamera(config=generic_cfg, printer_id="printer-2")
+    assert isinstance(generic, CameraClientProtocol)
+    assert generic.camera_type == "generic_rtsp"
+
+    created_tapo = create_camera_client(tapo_cfg, printer_id="printer-1")
+    assert isinstance(created_tapo, TapoRTSPCamera)
+
+    created_generic = create_camera_client(generic_cfg, printer_id="printer-2")
+    assert isinstance(created_generic, GenericRTSPCamera)
+
+
+@pytest.mark.asyncio
+async def test_tapo_camera_stream_selection():
+    from bambu_monitor.camera import TapoRTSPCamera
+
+    cfg = CameraConfig(
+        type="tapo_rtsp",
+        rtsp_url="rtsp://admin:pass@192.168.1.50:554/stream1",
+        substream_url="rtsp://admin:pass@192.168.1.50:554/stream2",
+        stream="stream2",
+    )
+    cam = TapoRTSPCamera(config=cfg, printer_id="tapo-printer")
+    assert cam._get_active_stream_url() == "rtsp://admin:pass@192.168.1.50:554/stream2"
+
+    cfg_main = CameraConfig(
+        type="tapo_rtsp",
+        rtsp_url="rtsp://admin:pass@192.168.1.50:554/stream1",
+        stream="stream1",
+    )
+    cam_main = TapoRTSPCamera(config=cfg_main, printer_id="tapo-printer")
+    assert cam_main._get_active_stream_url() == "rtsp://admin:pass@192.168.1.50:554/stream1"
+
+
+@pytest.mark.asyncio
+async def test_camera_connect_and_health_success():
+    from bambu_monitor.camera import CameraHealth, TapoRTSPCamera
+
+    cfg = CameraConfig(
+        type="tapo_rtsp",
+        rtsp_url="rtsp://admin:pass@192.168.1.50:554/stream1",
+    )
+    cam = TapoRTSPCamera(config=cfg, printer_id="tapo-printer")
+
+    mock_ffmpeg_proc = AsyncMock()
+    mock_ffmpeg_proc.returncode = 0
+    mock_ffmpeg_proc.communicate.return_value = (FAKE_JPEG, b"")
+
+    mock_ffprobe_proc = AsyncMock()
+    mock_ffprobe_proc.returncode = 0
+    probe_json = b'{"streams": [{"codec_name": "h264", "width": 1920, "height": 1080, "r_frame_rate": "30/1"}]}'
+    mock_ffprobe_proc.communicate.return_value = (probe_json, b"")
+
+    async def side_effect(*args, **kwargs):
+        if args[0] == "ffmpeg":
+            return mock_ffmpeg_proc
+        return mock_ffprobe_proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=side_effect):
+        # connect() should succeed without exception
+        await cam.connect()
+
+        # health() should return CameraHealth instance
+        health = await cam.health()
+        assert isinstance(health, CameraHealth)
+        assert health.connected is True
+        assert health.resolution == "1920x1080"
+        assert health.codec == "h264"
+        assert health.fps == "30.0 fps"
+        assert health.camera_type == "tapo_rtsp"
+        assert health.image_size_bytes == len(FAKE_JPEG)
+        assert health.latency_ms is not None
+
+        # close() should run cleanly
+        await cam.close()
+
+
+@pytest.mark.asyncio
+async def test_camera_connect_failure():
+    from bambu_monitor.camera import CameraConnectionError, TapoRTSPCamera
+
+    cfg = CameraConfig(
+        type="tapo_rtsp",
+        rtsp_url="rtsp://admin:pass@192.168.1.50:554/stream1",
+    )
+    cam = TapoRTSPCamera(config=cfg, printer_id="tapo-printer")
+
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 1
+    mock_proc.communicate.return_value = (b"", b"Connection refused")
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CameraConnectionError):
+            await cam.connect()
+

@@ -108,3 +108,44 @@ def row_to_outbox_message(row: Any) -> OutboxMessage:
         delivered_at=parse_datetime(row["delivered_at"]),
         error_message=row["error_message"],
     )
+
+
+def row_to_timelapse_session(row: Any) -> Any:
+    from bambu_monitor.timelapse.models import TimelapseSession, TimelapseStatus
+    meta = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+    return TimelapseSession(
+        id=row["id"],
+        print_job_id=row["print_job_id"],
+        printer_id=row["printer_id"],
+        camera_id=row["camera_id"],
+        camera_type=row["camera_type"],
+        status=TimelapseStatus(row["status"]),
+        started_at=parse_datetime(row["started_at"]) or datetime.now(timezone.utc),
+        paused_at=parse_datetime(row["paused_at"]),
+        resumed_at=parse_datetime(row["resumed_at"]),
+        completed_at=parse_datetime(row["completed_at"]),
+        frame_count=int(row["frame_count"]),
+        missed_frames=int(row["missed_frames"]),
+        capture_interval_seconds=float(row["capture_interval_seconds"]),
+        video_fps=int(row["video_fps"]),
+        video_path=row["video_path"],
+        storage_dir=row["storage_dir"],
+        error=row["error"],
+        paused_seconds=float(row["paused_seconds"] or 0.0),
+        camera_outage_count=int(row["camera_outage_count"] or 0),
+        camera_outage_seconds=float(row["camera_outage_seconds"] or 0.0),
+        metadata=meta,
+        created_at=parse_datetime(row["created_at"]) or datetime.now(timezone.utc),
+        updated_at=parse_datetime(row["updated_at"]) or datetime.now(timezone.utc),
+    )
+
+
+def row_to_timelapse_pause(row: Any) -> Any:
+    from bambu_monitor.timelapse.models import TimelapsePause
+    return TimelapsePause(
+        id=row["id"],
+        session_id=row["session_id"],
+        started_at=parse_datetime(row["started_at"]) or datetime.now(timezone.utc),
+        ended_at=parse_datetime(row["ended_at"]),
+        duration_seconds=float(row["duration_seconds"] or 0.0),
+    )

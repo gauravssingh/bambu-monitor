@@ -25,6 +25,10 @@ from bambu_monitor.cli.commands import (
     cmd_service_status,
     cmd_service_stop,
     cmd_status,
+    cmd_timelapse_camera_test,
+    cmd_timelapse_generate,
+    cmd_timelapse_list,
+    cmd_timelapse_status,
 )
 from bambu_monitor.config import load_config
 
@@ -149,6 +153,23 @@ def build_parser() -> argparse.ArgumentParser:
     cam_snap.add_argument("printer_id", help="ID of printer")
     cam_snap.add_argument("-o", "--output", help="Output file path for captured JPEG", default=None)
 
+    # 12. timelapse
+    tl_parser = subparsers.add_parser("timelapse", help="Manage and monitor print timelapse subsystem")
+    tl_sub = tl_parser.add_subparsers(dest="timelapse_action")
+
+    tl_status = tl_sub.add_parser("status", help="Show active timelapse status across printers")
+    tl_status.add_argument("printer_id", nargs="?", default=None, help="Optional printer ID")
+
+    tl_list = tl_sub.add_parser("list", help="List recorded timelapse sessions")
+    tl_list.add_argument("printer_id", nargs="?", default=None, help="Optional printer ID filter")
+    tl_list.add_argument("-n", "--limit", type=int, default=20, help="Maximum sessions to list")
+
+    tl_test = tl_sub.add_parser("camera-test", help="Verify RTSP camera stream and capture a diagnostic snapshot")
+    tl_test.add_argument("printer_id", nargs="?", default=None, help="Optional printer ID")
+
+    tl_gen = tl_sub.add_parser("generate", help="Generate or re-compile MP4 video from existing frames")
+    tl_gen.add_argument("job_id", help="Print Job ID or Timelapse Session ID")
+
     return parser
 
 
@@ -239,6 +260,19 @@ def main() -> None:
             asyncio.run(cmd_camera_snap(printer_id=args.printer_id, output=args.output, settings=settings))
         else:
             parser.parse_args(["camera", "--help"])
+
+    elif cmd == "timelapse":
+        action = getattr(args, "timelapse_action", None)
+        if action == "status":
+            asyncio.run(cmd_timelapse_status(printer_id=args.printer_id, settings=settings))
+        elif action == "list":
+            asyncio.run(cmd_timelapse_list(printer_id=args.printer_id, limit=args.limit, settings=settings))
+        elif action == "camera-test":
+            asyncio.run(cmd_timelapse_camera_test(printer_id=args.printer_id, settings=settings))
+        elif action == "generate":
+            asyncio.run(cmd_timelapse_generate(job_or_session_id=args.job_id, settings=settings))
+        else:
+            parser.parse_args(["timelapse", "--help"])
 
     else:
         parser.print_help()

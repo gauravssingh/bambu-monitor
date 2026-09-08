@@ -44,3 +44,29 @@ detection:
     enabled: true
     min_check_seconds: 300.0
     adaptive_factor: 1.5
+
+# Print timelapse subsystem configuration
+timelapse:
+  enabled: true
+  storage_dir: ./data/timelapses
+  camera:
+    type: tapo_rtsp
+    # Stream selection: 'stream1' (HD 1080p/2K) or 'stream2' (360p sub-stream)
+    stream: stream1
+    # RTSP URL configured via env var to prevent committing camera credentials:
+    # rtsp://<username>:<password>@<camera-ip>:554/stream1
+    url: ${TIMELAPSE_CAMERA_RTSP:}
+  capture:
+    interval_seconds: 5.0
+    mode: interval
+  video:
+    fps: 30
+    codec: libx264
+    quality: 18
+    pixel_format: yuv420p
+  retention:
+    # 'delete_after_video' cleans up frame images once MP4 renders successfully; 'retain' keeps all JPEGs
+    successful_frames: delete_after_video
+    # Retain frame images for failed or cancelled prints for post-mortem analysis
+    failed_frames: retain
+    videos_days: 365

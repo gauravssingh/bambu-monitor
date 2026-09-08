@@ -2,7 +2,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 47 Passed](https://img.shields.io/badge/tests-47%20passed-brightgreen.svg)]()
+[![Tests: 109 Passed](https://img.shields.io/badge/tests-109%20passed-brightgreen.svg)]()
 [![Architecture: Phase 1--4 Complete](https://img.shields.io/badge/architecture-Phase%201--4%20Complete-blueviolet.svg)]()
 [![Database: SQLite WAL](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)]()
 
@@ -51,6 +51,7 @@ graph TD
 * **Adaptive Multi-Factor Stall Detection**: Evaluates print duration, layer changes, nozzle temperature stability, and heating state to detect genuine nozzle blockages and mechanical stalls while preventing false positives on long print moves.
 * **Alert Lifecycle & Spam Suppression**: Full alert state machine (`ACTIVE` → `ACKNOWLEDGED` → `RESOLVED`). Fires notifications on trigger and resolution while completely suppressing repeated telemetry noise during active conditions.
 * **Reliable Outbox Delivery Worker (Phase 4)**: Background worker delivering domain events to webhook destinations with per-printer sequential FIFO ordering, exponential backoff, dead-letter queue (`failed` DLQ), and HMAC-SHA256 authentication.
+* **Automated Camera Timelapse Subsystem**: Vendor-agnostic (TP-Link Tapo RTSP & Generic RTSP) periodic frame capture worker tightly integrated into canonical print lifecycle events (`print.started`, `print.paused`, `print.resumed`, `print.completed`, `print.failed`). Features zero-impact camera failure isolation (`DEGRADED`), pause duration accounting, restart reconciliation, gap-free re-indexing, and atomic MP4 encoding via FFmpeg.
 * **Native Background Service Management**: Built-in CLI commands to start, stop, restart, check status, and tail logs for background operation.
 
 ---
@@ -275,8 +276,60 @@ Base URL: `http://localhost:8000`
 * `GET /api/v1/printers/{printer_id}/alerts?active_only=true` — Query active or historical alerts.
 * `POST /api/v1/printers/{printer_id}/alerts/{alert_id}/acknowledge` — Transition alert from `ACTIVE` → `ACKNOWLEDGED`.
 
+### Timelapses
+* `GET /api/v1/printers/{printer_id}/timelapses` — List all recorded timelapse sessions.
+* `GET /api/v1/printers/{printer_id}/timelapses/{session_id}` — Detailed session status, pause records, and manifest.
+* `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/video` — Stream or download the generated MP4 video file (`video/mp4`).
+* `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/frames` — List captured frame indices and retrieval URLs.
+* `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/frames/{sequence}` — Retrieve an individual JPEG frame (`image/jpeg`).
+
 ### Real-Time Events (SSE)
 * `GET /api/v1/printers/{printer_id}/events/stream` — Real-time Server-Sent Events stream for live dashboards.
+
+---
+
+## Camera Timelapse Subsystem
+
+Bambu Monitor includes a production-grade, camera-vendor-agnostic print timelapse subsystem designed specifically for external RTSP cameras (such as TP-Link Tapo C100, C110, C200, C210) pointed at the printer bed.
+
+### 1. TP-Link Tapo Camera Setup
+1. **Enable Local RTSP Account**:
+   * Open the **TP-Link Tapo App** on iOS / Android.
+   * Navigate to: *Camera Settings → Advanced Settings → Camera Account*.
+   * Create a dedicated username and password for local stream access.
+2. **Stream URLs**:
+   * **High Definition (1080p / 2K)**: `rtsp://<username>:<password>@<camera-ip>:554/stream1`
+   * **Standard Definition (360p)**: `rtsp://<username>:<password>@<camera-ip>:554/stream2`
+3. **Environment Configuration**:
+   Never commit camera passwords to configuration files. Set `TIMELAPSE_CAMERA_RTSP` in your `.env` or system environment:
+   ```bash
+   export TIMELAPSE_CAMERA_RTSP="rtsp://admin:YourSecretPass@192.168.1.55:554/stream1"
+   ```
+
+### 2. Architecture & Lifecycle State Machine
+* **Lifecycle Driven**: Synchronizes automatically with printer events without polling or custom scripts:
+  * `print.started` → Allocates session, creates filesystem directory, launches capture worker.
+  * `print.paused` → Halts frame capture, tracks pause timestamps and cumulative paused seconds.
+  * `print.resumed` → Restarts periodic capture ticks.
+  * `print.completed` / `print.failed` → Finalizes capture, re-indexes frame sequences to guarantee gap-free continuity, compiles MP4 with FFmpeg atomically (`.tmp.mp4` → `timelapse.mp4`), and writes `manifest.json`.
+* **Zero-Impact Camera Isolation**: If the camera goes offline during a print (e.g. WiFi glitch), the timelapse transitions to `DEGRADED` and backs off reconnection attempts. **Printer telemetry, stall detection, and alert forwarding continue completely uninterrupted.**
+* **Restart Resilience**: If the service restarts during an active print, it re-attaches to the existing timelapse session and resumes capture without duplicate records or lost frames.
+* **Smart Retention**: By default (`successful_frames: delete_after_video`), raw frame JPEGs are deleted after the final MP4 is verified to save disk space. Frames for failed prints are preserved (`failed_frames: retain`) for visual troubleshooting.
+
+### 3. CLI Commands
+```bash
+# Test camera stream connectivity and grab a test snapshot:
+bambu-monitor timelapse camera-test --printer bambu-a1-mini-602482
+
+# Check live timelapse capture status across all printers:
+bambu-monitor timelapse status
+
+# List historical timelapse sessions:
+bambu-monitor timelapse list
+
+# Manually compile or re-render an MP4 video from stored frames:
+bambu-monitor timelapse generate <session-id-or-job-id>
+```
 
 ---
 

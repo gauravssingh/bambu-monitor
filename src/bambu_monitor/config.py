@@ -67,6 +67,10 @@ class PrinterConfig(BaseModel):
         default=None,
         description="Optional RTSP camera configuration for visual monitoring",
     )
+    timelapse: Optional[TimelapseConfig] = Field(
+        default=None,
+        description="Optional per-printer timelapse configuration overriding global settings",
+    )
 
     @field_validator("access_code", mode="before")
     @classmethod
@@ -101,6 +105,39 @@ class DetectionConfig(BaseModel):
     stall: StallDetectionConfig = Field(default_factory=StallDetectionConfig)
 
 
+class TimelapseCameraConfig(BaseModel):
+    type: str = "tapo_rtsp"
+    url: str = Field(default="", description="RTSP URL for timelapse camera")
+    stream: str = Field(default="stream1", description="Stream profile, e.g. stream1 HD")
+
+
+class TimelapseCaptureConfig(BaseModel):
+    interval_seconds: float = Field(default=5.0, ge=0.01, description="Snapshot interval in seconds")
+    mode: str = Field(default="interval", description="Capture mode: interval (V1), layer or hybrid (future)")
+
+
+class TimelapseVideoConfig(BaseModel):
+    fps: int = Field(default=30, ge=1, le=120, description="Timelapse output video framerate")
+    codec: str = Field(default="libx264", description="FFmpeg video codec")
+    quality: int = Field(default=18, ge=0, le=51, description="FFmpeg Constant Rate Factor (CRF) quality")
+    pixel_format: str = Field(default="yuv420p", description="Pixel format for maximum playback compatibility")
+
+
+class TimelapseRetentionConfig(BaseModel):
+    successful_frames: str = Field(default="delete_after_video", description="Retention for successful print frames: delete_after_video or retain")
+    failed_frames: str = Field(default="retain", description="Retention for failed print frames")
+    videos_days: int = Field(default=365, ge=1, description="Days to retain completed video files")
+
+
+class TimelapseConfig(BaseModel):
+    enabled: bool = True
+    storage_dir: str = Field(default="./data/timelapses", description="Root filesystem storage directory for timelapses")
+    camera: TimelapseCameraConfig = Field(default_factory=TimelapseCameraConfig)
+    capture: TimelapseCaptureConfig = Field(default_factory=TimelapseCaptureConfig)
+    video: TimelapseVideoConfig = Field(default_factory=TimelapseVideoConfig)
+    retention: TimelapseRetentionConfig = Field(default_factory=TimelapseRetentionConfig)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -115,6 +152,37 @@ class Settings(BaseSettings):
     )
     events: EventsConfig = Field(default_factory=EventsConfig)
     detection: DetectionConfig = Field(default_factory=DetectionConfig)
+    timelapse: TimelapseConfig = Field(default_factory=TimelapseConfig)
+
+    def get_timelapse_config(self, printer_id: str) -> TimelapseConfig:
+        """Resolve effective timelapse configuration for a given printer."""
+        printer_cfg = next((p for p in self.printers if p.id == printer_id), None)
+        cfg = self.timelapse.model_copy(deep=True)
+        if printer_cfg and printer_cfg.timelapse:
+            p_tl = printer_cfg.timelapse
+            cfg.enabled = p_tl.enabled
+            if p_tl.storage_dir and p_tl.storage_dir != "./data/timelapses":
+                cfg.storage_dir = p_tl.storage_dir
+            if p_tl.camera.url:
+                cfg.camera.url = p_tl.camera.url
+            if p_tl.camera.type:
+                cfg.camera.type = p_tl.camera.type
+            if p_tl.camera.stream:
+                cfg.camera.stream = p_tl.camera.stream
+            if p_tl.capture:
+                cfg.capture = p_tl.capture.model_copy(deep=True)
+            if p_tl.video:
+                cfg.video = p_tl.video.model_copy(deep=True)
+            if p_tl.retention:
+                cfg.retention = p_tl.retention.model_copy(deep=True)
+
+        if not cfg.camera.url and printer_cfg and printer_cfg.camera and printer_cfg.camera.rtsp_url:
+            cfg.camera.url = printer_cfg.camera.rtsp_url
+            if hasattr(printer_cfg.camera, "stream") and printer_cfg.camera.stream:
+                cfg.camera.stream = printer_cfg.camera.stream
+            if hasattr(printer_cfg.camera, "type") and printer_cfg.camera.type:
+                cfg.camera.type = printer_cfg.camera.type
+        return cfg
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Settings:
@@ -158,6 +226,9 @@ def load_config(config_path: str | Path | None = None) -> Settings:
         db_path = Path(settings.database.path)
         if not db_path.is_absolute():
             settings.database.path = str((base_dir / db_path).resolve())
+        storage_path = Path(settings.timelapse.storage_dir)
+        if not storage_path.is_absolute():
+            settings.timelapse.storage_dir = str((base_dir / storage_path).resolve())
         return settings
 
     return Settings()

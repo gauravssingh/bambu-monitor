@@ -12,6 +12,8 @@ class CameraConfig(BaseModel):
     """Configuration for an RTSP camera stream associated with a printer."""
 
     enabled: bool = True
+    type: str = Field(default="tapo_rtsp", description="Camera client type (e.g. tapo_rtsp, generic_rtsp)")
+    stream: str = Field(default="stream1", description="Stream identifier or profile (e.g. stream1 HD, stream2 SD)")
     rtsp_url: str = Field(default="", description="Primary RTSP stream URL (e.g. /stream1 HD)")
     substream_url: Optional[str] = Field(
         default=None,

@@ -25,7 +25,7 @@ from bambu_monitor.bambu.credentials import (
 from bambu_monitor.bambu.discovery import DiscoveredPrinter, discover_printers
 from bambu_monitor.bambu.protocol import BAMBU_DISCOVERY_PORT, BAMBU_LAN_USERNAME, BAMBU_MQTT_PORT
 from bambu_monitor.config import Settings, load_config
-from bambu_monitor.camera import CameraClient, CameraError
+from bambu_monitor.camera import CameraClient, CameraConfig, CameraError, create_camera_client
 from bambu_monitor.domain.printer import Printer
 from bambu_monitor.storage.database import Database
 from bambu_monitor.storage.repositories import (
@@ -33,7 +33,9 @@ from bambu_monitor.storage.repositories import (
     JobRepository,
     OutboxRepository,
     PrinterRepository,
+    TimelapseRepository,
 )
+from bambu_monitor.timelapse import TimelapseRenderer, TimelapseStorage
 
 logger = logging.getLogger(__name__)
 
@@ -698,3 +700,224 @@ async def cmd_camera_test(
     if diag.get("fps"):
         print(f"  ✓ Framerate:              {diag['fps']}")
     print("\nCamera stream is verified and ready for monitoring!\n")
+
+
+# --- Timelapse Subsystem CLI Commands ---
+
+async def cmd_timelapse_camera_test(
+    printer_id: Optional[str] = None,
+    settings: Optional[Settings] = None,
+) -> None:
+    """Independent camera diagnostic command verifying RTSP connectivity and frame capture."""
+    from datetime import datetime
+    active_settings = settings or load_config()
+
+    # 1. Configuration loaded
+    target_printer_id = printer_id
+    p_cfg = None
+    if target_printer_id:
+        p_cfg = next((p for p in active_settings.printers if p.id == target_printer_id), None)
+        if not p_cfg:
+            print(f"Error: Printer '{target_printer_id}' not found in configuration.")
+            return
+    else:
+        p_cfg = next((p for p in active_settings.printers if p.camera and p.camera.rtsp_url), None)
+        if not p_cfg and active_settings.printers:
+            p_cfg = active_settings.printers[0]
+        if p_cfg:
+            target_printer_id = p_cfg.id
+
+    tl_cfg = active_settings.get_timelapse_config(target_printer_id or "default")
+    cam_url = tl_cfg.camera.url or (p_cfg.camera.rtsp_url if (p_cfg and p_cfg.camera) else "")
+    if not cam_url:
+        print("Error: No RTSP camera URL configured.")
+        print("Tip: Set A1_MINI_CAMERA_RTSP or TIMELAPSE_CAMERA_RTSP in environment or configure camera in config.yaml.")
+        return
+
+    cam_config = CameraConfig(
+        enabled=True,
+        type=tl_cfg.camera.type,
+        stream=tl_cfg.camera.stream,
+        rtsp_url=cam_url,
+        timeout_seconds=5.0,
+    )
+    client = create_camera_client(cam_config, printer_id=target_printer_id or "camera-test")
+    cam_label = "Tapo RTSP" if "tapo" in tl_cfg.camera.type.lower() else tl_cfg.camera.type
+
+    # 2. Check RTSP connectivity & metadata probe
+    t0 = time.perf_counter()
+    try:
+        diag = await client.health()
+    except Exception as exc:
+        print(f"Camera: {cam_label}")
+        print("Connection: FAILED")
+        print(f"Error: {exc}")
+        return
+
+    if not diag.connected:
+        print(f"Camera: {cam_label}")
+        print("Connection: FAILED")
+        print(f"Error: {diag.error}")
+        return
+
+    # 3. Stream availability & Frame capture
+    try:
+        frame_bytes = await client.capture()
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+    except Exception as exc:
+        print(f"Camera: {cam_label}")
+        print("Connection: OK")
+        print("Snapshot: FAILED")
+        print(f"Error: {exc}")
+        return
+
+    # 4. JPEG validity
+    if not frame_bytes.startswith(b"\xff\xd8"):
+        print(f"Camera: {cam_label}")
+        print("Connection: OK")
+        print("Snapshot: FAILED (invalid JPEG marker)")
+        return
+
+    # 5. Output file creation
+    storage = TimelapseStorage(base_dir=active_settings.timelapse.storage_dir)
+    test_dir = storage.get_test_dir()
+    timestamp_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_file = test_dir / f"{timestamp_str}.jpg"
+    out_file.write_bytes(frame_bytes)
+
+    latency_val = diag.latency_ms if diag.latency_ms is not None else round(elapsed_ms, 1)
+
+    print(f"Camera: {cam_label}")
+    print("Connection: OK")
+    print(f"Stream: {tl_cfg.camera.stream}")
+    print("Snapshot: OK")
+    if diag.resolution:
+        print(f"Resolution: {diag.resolution}")
+    print(f"Latency: {int(latency_val)} ms")
+    print("\nSaved:")
+    print(str(out_file))
+
+
+async def cmd_timelapse_status(
+    printer_id: Optional[str] = None,
+    settings: Optional[Settings] = None,
+) -> None:
+    """Display overall timelapse subsystem status across printers."""
+    active_settings = settings or load_config()
+    db, p_repo, _, _, _ = get_db_and_repos(active_settings)
+    await db.init_db()
+    tl_repo = TimelapseRepository(db)
+
+    printers = await p_repo.list_all()
+    if printer_id:
+        printers = [p for p in printers if p.id == printer_id]
+
+    print("\nBambu Monitor — Timelapse Status\n")
+    print(f"Storage Directory: {active_settings.timelapse.storage_dir}")
+    print(f"Capture Interval:  {active_settings.timelapse.capture.interval_seconds}s")
+    print(f"Video Output:      {active_settings.timelapse.video.fps} FPS ({active_settings.timelapse.video.codec})")
+    print()
+
+    if not printers:
+        print("No printers configured.")
+        return
+
+    for p in printers:
+        print(f"Printer: {p.model} ({p.id})")
+        tl_cfg = active_settings.get_timelapse_config(p.id)
+        print(f"  Timelapse Enabled: {'Yes' if tl_cfg.enabled else 'No'}")
+        print(f"  Camera Type:       {tl_cfg.camera.type} ({tl_cfg.camera.stream})")
+        active_session = await tl_repo.get_active_session_for_printer(p.id)
+        if active_session:
+            print(f"  Active Session:    {active_session.id}")
+            print(f"  Print Job:         {active_session.print_job_id}")
+            print(f"  Status:            {active_session.status.value.upper()}")
+            print(f"  Frames Captured:   {active_session.frame_count} ({active_session.missed_frames} missed)")
+            if active_session.paused_seconds > 0:
+                print(f"  Paused Duration:   {int(active_session.paused_seconds)}s")
+            if active_session.error:
+                print(f"  Last Error:        {active_session.error}")
+        else:
+            print("  Active Session:    None (idle)")
+        print()
+
+
+async def cmd_timelapse_list(
+    printer_id: Optional[str] = None,
+    limit: int = 20,
+    settings: Optional[Settings] = None,
+) -> None:
+    """List historical timelapse sessions."""
+    active_settings = settings or load_config()
+    db, p_repo, _, _, _ = get_db_and_repos(active_settings)
+    await db.init_db()
+    tl_repo = TimelapseRepository(db)
+
+    printers = await p_repo.list_all()
+    if printer_id:
+        printers = [p for p in printers if p.id == printer_id]
+
+    all_sessions = []
+    for p in printers:
+        sessions = await tl_repo.list_sessions_for_printer(p.id, limit=limit)
+        all_sessions.extend(sessions)
+
+    all_sessions.sort(key=lambda s: s.started_at, reverse=True)
+    all_sessions = all_sessions[:limit]
+
+    if not all_sessions:
+        print("\nNo timelapse sessions recorded yet.\n")
+        return
+
+    print("\nRecorded Timelapses:\n")
+    header = f"  {'Session ID':<26} {'Printer':<14} {'Job ID':<24} {'Status':<12} {'Frames':<8} {'Video'}"
+    print(header)
+    print("  " + "─" * 90)
+    for s in all_sessions:
+        has_video = "✓ Yes" if s.video_path and Path(s.video_path).is_file() else "No"
+        print(f"  {s.id:<26} {s.printer_id:<14} {s.print_job_id:<24} {s.status.value:<12} {s.frame_count:<8} {has_video}")
+    print()
+
+
+async def cmd_timelapse_generate(
+    job_or_session_id: str,
+    settings: Optional[Settings] = None,
+) -> None:
+    """Manually compile / re-compile an MP4 video from stored frame images."""
+    active_settings = settings or load_config()
+    db, _, _, _, _ = get_db_and_repos(active_settings)
+    await db.init_db()
+    tl_repo = TimelapseRepository(db)
+    storage = TimelapseStorage(base_dir=active_settings.timelapse.storage_dir)
+
+    session = await tl_repo.get_session(job_or_session_id)
+    if not session:
+        session = await tl_repo.get_session_by_job(job_or_session_id)
+
+    if not session:
+        print(f"Error: Timelapse session not found for ID '{job_or_session_id}'.")
+        return
+
+    frames = storage.list_frames(Path(session.storage_dir))
+    if not frames:
+        print(f"Error: No frames found for session '{session.id}' in {session.storage_dir}/frames.")
+        return
+
+    print(f"\nGenerating timelapse video for session {session.id} ({len(frames)} frames)...")
+    renderer = TimelapseRenderer()
+    cfg = active_settings.get_timelapse_config(session.printer_id)
+
+    try:
+        video_path = await renderer.render(
+            session=session,
+            storage=storage,
+            fps=cfg.video.fps,
+            codec=cfg.video.codec,
+            quality=cfg.video.quality,
+            pixel_format=cfg.video.pixel_format,
+        )
+        await tl_repo.save_session(session)
+        print(f"  ✓ Video compiled successfully ({video_path.stat().st_size / (1024 * 1024):.2f} MB)")
+        print(f"  ✓ Saved to: {video_path.resolve()}\n")
+    except Exception as exc:
+        print(f"  ✗ Video generation failed: {exc}\n")

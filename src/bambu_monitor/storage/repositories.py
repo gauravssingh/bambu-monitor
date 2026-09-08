@@ -481,3 +481,177 @@ class OutboxRepository:
             }
         finally:
             await conn.close()
+
+
+class TimelapseRepository:
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def save_session(self, session: Any) -> None:
+        from bambu_monitor.storage.models import format_datetime
+        conn = await self.db.get_connection()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO timelapse_sessions (
+                    id, print_job_id, printer_id, camera_id, camera_type, status,
+                    started_at, paused_at, resumed_at, completed_at, frame_count,
+                    missed_frames, capture_interval_seconds, video_fps, video_path,
+                    storage_dir, error, paused_seconds, camera_outage_count,
+                    camera_outage_seconds, metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    status = excluded.status,
+                    paused_at = excluded.paused_at,
+                    resumed_at = excluded.resumed_at,
+                    completed_at = excluded.completed_at,
+                    frame_count = excluded.frame_count,
+                    missed_frames = excluded.missed_frames,
+                    video_path = excluded.video_path,
+                    error = excluded.error,
+                    paused_seconds = excluded.paused_seconds,
+                    camera_outage_count = excluded.camera_outage_count,
+                    camera_outage_seconds = excluded.camera_outage_seconds,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session.id,
+                    session.print_job_id,
+                    session.printer_id,
+                    session.camera_id,
+                    session.camera_type,
+                    session.status.value if hasattr(session.status, "value") else str(session.status),
+                    format_datetime(session.started_at),
+                    format_datetime(session.paused_at),
+                    format_datetime(session.resumed_at),
+                    format_datetime(session.completed_at),
+                    session.frame_count,
+                    session.missed_frames,
+                    session.capture_interval_seconds,
+                    session.video_fps,
+                    session.video_path,
+                    session.storage_dir,
+                    session.error,
+                    session.paused_seconds,
+                    session.camera_outage_count,
+                    session.camera_outage_seconds,
+                    json.dumps(session.metadata),
+                    format_datetime(session.created_at),
+                    format_datetime(session.updated_at),
+                ),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
+
+    async def get_session(self, session_id: str) -> Optional[Any]:
+        from bambu_monitor.storage.models import row_to_timelapse_session
+        conn = await self.db.get_connection()
+        try:
+            async with conn.execute("SELECT * FROM timelapse_sessions WHERE id = ?", (session_id,)) as cursor:
+                row = await cursor.fetchone()
+                return row_to_timelapse_session(row) if row else None
+        finally:
+            await conn.close()
+
+    async def get_session_by_job(self, job_id: str) -> Optional[Any]:
+        from bambu_monitor.storage.models import row_to_timelapse_session
+        conn = await self.db.get_connection()
+        try:
+            async with conn.execute(
+                "SELECT * FROM timelapse_sessions WHERE print_job_id = ? ORDER BY started_at DESC LIMIT 1",
+                (job_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row_to_timelapse_session(row) if row else None
+        finally:
+            await conn.close()
+
+    async def get_active_session_for_printer(self, printer_id: str) -> Optional[Any]:
+        from bambu_monitor.storage.models import row_to_timelapse_session
+        conn = await self.db.get_connection()
+        try:
+            async with conn.execute(
+                """
+                SELECT * FROM timelapse_sessions
+                WHERE printer_id = ? AND status IN ('idle', 'capturing', 'paused', 'degraded', 'finalizing')
+                ORDER BY started_at DESC LIMIT 1
+                """,
+                (printer_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row_to_timelapse_session(row) if row else None
+        finally:
+            await conn.close()
+
+    async def list_sessions_for_printer(self, printer_id: str, limit: int = 50) -> List[Any]:
+        from bambu_monitor.storage.models import row_to_timelapse_session
+        conn = await self.db.get_connection()
+        try:
+            async with conn.execute(
+                "SELECT * FROM timelapse_sessions WHERE printer_id = ? ORDER BY started_at DESC LIMIT ?",
+                (printer_id, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [row_to_timelapse_session(r) for r in rows]
+        finally:
+            await conn.close()
+
+    async def save_pause(self, pause: Any) -> int:
+        from bambu_monitor.storage.models import format_datetime
+        conn = await self.db.get_connection()
+        try:
+            cursor = await conn.execute(
+                """
+                INSERT INTO timelapse_pauses (session_id, started_at, ended_at, duration_seconds)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    pause.session_id,
+                    format_datetime(pause.started_at),
+                    format_datetime(pause.ended_at),
+                    pause.duration_seconds,
+                ),
+            )
+            pause_id = cursor.lastrowid or 0
+            pause.id = pause_id
+            await conn.commit()
+            return pause_id
+        finally:
+            await conn.close()
+
+    async def update_pause(self, pause: Any) -> None:
+        from bambu_monitor.storage.models import format_datetime
+        conn = await self.db.get_connection()
+        try:
+            await conn.execute(
+                """
+                UPDATE timelapse_pauses
+                SET ended_at = ?, duration_seconds = ?
+                WHERE id = ?
+                """,
+                (
+                    format_datetime(pause.ended_at),
+                    pause.duration_seconds,
+                    pause.id,
+                ),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
+
+    async def get_pauses_for_session(self, session_id: str) -> List[Any]:
+        from bambu_monitor.storage.models import row_to_timelapse_pause
+        conn = await self.db.get_connection()
+        try:
+            async with conn.execute(
+                "SELECT * FROM timelapse_pauses WHERE session_id = ? ORDER BY started_at ASC",
+                (session_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [row_to_timelapse_pause(r) for r in rows]
+        finally:
+            await conn.close()
+
