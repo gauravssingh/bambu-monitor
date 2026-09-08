@@ -2,7 +2,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 119 Passed](https://img.shields.io/badge/tests-119%20passed-brightgreen.svg)]()
+[![Tests: 123 Passed](https://img.shields.io/badge/tests-123%20passed-brightgreen.svg)]()
 [![Architecture: Phase 1--4 Complete](https://img.shields.io/badge/architecture-Phase%201--4%20Complete-blueviolet.svg)]()
 [![Database: SQLite WAL](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)]()
 
@@ -366,7 +366,7 @@ Open `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/view` in any bro
 The test suite is fully decoupled from physical printer hardware using stored fixtures:
 
 ```bash
-# Run the complete test suite (119 unit and integration tests)
+# Run the complete test suite (123 unit and integration tests)
 pytest -v
 
 # Run system and network diagnostics on your environment

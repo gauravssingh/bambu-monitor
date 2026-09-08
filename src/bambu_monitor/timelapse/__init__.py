@@ -18,6 +18,7 @@ from bambu_monitor.timelapse.correlation import (
     ThermalSummary,
     TimelinePoint,
 )
+from bambu_monitor.timelapse.overlay import TelemetryOverlayBurner
 from bambu_monitor.timelapse.renderer import TimelapseRenderError, TimelapseRenderer
 from bambu_monitor.timelapse.storage import TimelapseStorage
 
@@ -28,6 +29,7 @@ __all__ = [
     "TelemetryAnomaly",
     "TelemetryAnomalyType",
     "TelemetryCorrelator",
+    "TelemetryOverlayBurner",
     "ThermalStats",
     "ThermalSummary",
     "TimelinePoint",
