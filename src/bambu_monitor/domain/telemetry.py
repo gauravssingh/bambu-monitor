@@ -174,6 +174,9 @@ class TelemetryPatch(BaseModel):
     error_code: Optional[int] = None
     filament_runout: Optional[bool] = None
     filament_runout_details: Dict[str, Any] = Field(default_factory=dict)
+    speed_level: Optional[int] = None
+    speed_magnitude: Optional[int] = None
+    cooling_fan_speed: Optional[int] = None
 
     @classmethod
     def from_raw(cls, printer_id: str, raw: Dict[str, Any], timestamp: Optional[datetime] = None) -> TelemetryPatch:
@@ -284,6 +287,23 @@ class TelemetryPatch(BaseModel):
         else:
             online = None
 
+        # Speed and fan levels
+        speed_level = payload.get("speed_level")
+        if speed_level is None and "spd_lvl" in payload:
+            speed_level = _as_int(payload["spd_lvl"])
+        elif speed_level is not None:
+            speed_level = _as_int(speed_level)
+
+        speed_magnitude = payload.get("speed_magnitude")
+        if speed_magnitude is None and "spd_mag" in payload:
+            speed_magnitude = _as_int(payload["spd_mag"])
+        elif speed_magnitude is not None:
+            speed_magnitude = _as_int(speed_magnitude)
+
+        cooling_fan = payload.get("cooling_fan_speed")
+        if cooling_fan is not None:
+            cooling_fan = _as_int(cooling_fan)
+
         return cls(
             printer_id=printer_id,
             timestamp=ts,
@@ -305,4 +325,7 @@ class TelemetryPatch(BaseModel):
             error_code=error_code,
             filament_runout=filament_runout,
             filament_runout_details=filament_runout_details,
+            speed_level=speed_level,
+            speed_magnitude=speed_magnitude,
+            cooling_fan_speed=cooling_fan,
         )

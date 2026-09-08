@@ -2,7 +2,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 112 Passed](https://img.shields.io/badge/tests-112%20passed-brightgreen.svg)]()
+[![Tests: 119 Passed](https://img.shields.io/badge/tests-119%20passed-brightgreen.svg)]()
 [![Architecture: Phase 1--4 Complete](https://img.shields.io/badge/architecture-Phase%201--4%20Complete-blueviolet.svg)]()
 [![Database: SQLite WAL](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)]()
 
@@ -333,7 +333,23 @@ bambu-monitor timelapse list
 
 # Manually compile or re-render an MP4 video from stored frames:
 bambu-monitor timelapse generate <session-id-or-job-id>
+
+# Correlate printer telemetry (hotend/bed temps, speed, layers) with visual frames:
+bambu-monitor timelapse correlate <printer-id> [session-id] [--temp-drop-threshold 10.0]
 ```
+
+### 4. Telemetry-Vision Correlation & Defect Analysis
+Bambu Monitor synchronizes the printer's sensor telemetry with every single visual frame recorded:
+* **Per-Frame Sidecar Dataset (`frames.jsonl`)**: Each frame record logs live `nozzle_temp`, `nozzle_target`, `bed_temp`, `bed_target`, `layer`, `progress`, and `speed_level`.
+* **Automated Thermal Anomaly Detection**: Detects sudden hotend temperature drops (e.g. `> 10°C` below target while printing) and bed drops, flagging the exact starting frame, recovery frame, and delta.
+* **Extrusion Stall & Event Correlation**: Correlates motion stalls (`print.possible_blockage`), pauses (`print.paused`), filament runouts (`filament.runout`), and speed shifts (`print.speed_changed`) to their exact video timestamps and frame numbers.
+* **REST API**: `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/correlation` returns the full synchronized report and timeline.
+
+### 5. Interactive Web UI Player (`/view`)
+Open `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/view` in any browser for an enhanced player:
+* **Live Reactive HUD**: Displays real-time Hotend, Bed, Layer, Progress, and Speed corresponding to the video's active playback frame.
+* **Interactive SVG Temperature Profile**: An inline dual-line curve displaying hotend and bed temperatures across the video. Clicking anywhere on the chart scrubs the video to that exact point.
+* **Click-to-Jump Anomalies**: Badges for detected thermal drops and stalls that jump video playback directly to the fault frame.
 
 ---
 
@@ -350,7 +366,7 @@ bambu-monitor timelapse generate <session-id-or-job-id>
 The test suite is fully decoupled from physical printer hardware using stored fixtures:
 
 ```bash
-# Run the complete test suite (47 unit and integration tests)
+# Run the complete test suite (119 unit and integration tests)
 pytest -v
 
 # Run system and network diagnostics on your environment

@@ -192,3 +192,53 @@ async def test_worker_layer_trigger_and_metadata_sidecar(tmp_path: Path):
     assert records[0]["layer"] == 10
     assert records[0]["progress"] == 15.0
 
+
+@pytest.mark.asyncio
+async def test_worker_with_telemetry_provider(tmp_path: Path):
+    storage = TimelapseStorage(base_dir=tmp_path)
+    session_dir = tmp_path / "session_worker_telem"
+    session = TimelapseSession.create(
+        printer_id="printer-1",
+        print_job_id="job-telem",
+        capture_interval_seconds=10.0,
+        storage_dir=str(session_dir),
+    )
+
+    mock_camera = AsyncMock()
+    mock_camera.capture.return_value = MINI_JPEG
+
+    def mock_telemetry():
+        return {
+            "nozzle_temp": 220.5,
+            "nozzle_target": 220.0,
+            "bed_temp": 60.0,
+            "bed_target": 60.0,
+            "layer": 5,
+            "speed_percent": 100,
+            "printer_state": "printing",
+        }
+
+    worker = FrameCaptureWorker(
+        session=session,
+        camera=mock_camera,
+        storage=storage,
+        mode="layer",
+        telemetry_provider=mock_telemetry,
+    )
+    worker.start()
+
+    res = await worker.trigger_capture(reason="layer_change")
+    assert res is not None
+    await worker.stop()
+
+    records = storage.read_frames_metadata(session_dir)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["nozzle_temp"] == 220.5
+    assert rec["nozzle_target"] == 220.0
+    assert rec["bed_temp"] == 60.0
+    assert rec["layer"] == 5
+    assert rec["speed_percent"] == 100
+    assert rec["printer_state"] == "printing"
+
+

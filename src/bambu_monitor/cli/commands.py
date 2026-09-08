@@ -30,12 +30,13 @@ from bambu_monitor.domain.printer import Printer
 from bambu_monitor.storage.database import Database
 from bambu_monitor.storage.repositories import (
     AlertRepository,
+    EventRepository,
     JobRepository,
     OutboxRepository,
     PrinterRepository,
     TimelapseRepository,
 )
-from bambu_monitor.timelapse import TimelapseRenderer, TimelapseStorage
+from bambu_monitor.timelapse import TelemetryCorrelator, TimelapseRenderer, TimelapseStorage
 
 logger = logging.getLogger(__name__)
 
@@ -921,3 +922,101 @@ async def cmd_timelapse_generate(
         print(f"  ✓ Saved to: {video_path.resolve()}\n")
     except Exception as exc:
         print(f"  ✗ Video generation failed: {exc}\n")
+
+
+async def cmd_timelapse_correlate(
+    printer_id: str,
+    timelapse_id: Optional[str] = None,
+    temp_drop_threshold: float = 10.0,
+    settings: Optional[Settings] = None,
+) -> None:
+    """Correlate print telemetry with visual timelapse frames."""
+    active_settings = settings or load_config()
+    db, _, _, _, _ = get_db_and_repos(active_settings)
+    await db.init_db()
+    tl_repo = TimelapseRepository(db)
+    event_repo = EventRepository(db)
+    storage = TimelapseStorage(base_dir=active_settings.timelapse.storage_dir)
+
+    session = None
+    if timelapse_id:
+        session = await tl_repo.get_session(timelapse_id)
+        if not session:
+            session = await tl_repo.get_session_by_job(timelapse_id)
+    else:
+        sessions = await tl_repo.list_sessions_for_printer(printer_id, limit=1)
+        if sessions:
+            session = sessions[0]
+
+    if not session:
+        target_name = timelapse_id or f"printer '{printer_id}'"
+        print(f"Error: Timelapse session not found for {target_name}.")
+        return
+
+    frames_metadata = storage.read_frames_metadata(session.storage_dir)
+    events = await event_repo.list_for_printer(printer_id, limit=250, since=session.started_at)
+    if session.completed_at:
+        events = [e for e in events if e.timestamp <= session.completed_at]
+
+    report = TelemetryCorrelator.correlate(
+        session=session,
+        frames_metadata=frames_metadata,
+        events=events,
+        temp_drop_threshold=temp_drop_threshold,
+    )
+
+    print("\nBambu Monitor — Telemetry & Vision Correlation\n")
+    print(f"  Session ID:   {report.session_id}")
+    print(f"  Printer ID:   {report.printer_id}")
+    print(f"  Print Job:    {report.print_job_id}")
+    print(f"  Total Frames: {report.total_frames} ({report.fps} FPS, {report.video_duration_seconds:.1f}s duration)")
+    print()
+
+    # Thermal Performance
+    noz = report.thermal_summary.nozzle
+    bed = report.thermal_summary.bed
+    print("  Thermal Performance:")
+    if noz:
+        target_disp = f" (Target: {noz.target}°C)" if noz.target else ""
+        print(f"    Hotend:     Min: {noz.min}°C | Max: {noz.max}°C | Avg: {noz.avg}°C{target_disp}")
+    else:
+        print("    Hotend:     No telemetry samples recorded")
+
+    if bed:
+        target_disp = f" (Target: {bed.target}°C)" if bed.target else ""
+        print(f"    Bed:        Min: {bed.min}°C | Max: {bed.max}°C | Avg: {bed.avg}°C{target_disp}")
+    else:
+        print("    Bed:        No telemetry samples recorded")
+
+    print(f"    Stability:  {report.thermal_summary.stability_score:.1f} / 100")
+    print()
+
+    # Anomalies
+    print(f"  Detected Anomalies ({len(report.anomalies)}):")
+    if not report.anomalies:
+        print("    ✓ None detected (temperatures and motion remained within tolerances).")
+    else:
+        for a in report.anomalies:
+            t_str = f"{int(a.video_time_start // 60):02d}:{a.video_time_start % 60:05.2f}"
+            badge = f"[{a.severity.upper()}]"
+            print(f"    {badge:<10} Frame {a.start_frame} ({t_str}): {a.description}")
+    print()
+
+    # Layer Summary
+    if report.layers:
+        print(f"  Layer Breakdown ({len(report.layers)} layers):")
+        header = f"    {'Layer':<8} {'Frames':<14} {'Video Offset':<14} {'Avg Hotend':<14} {'Avg Bed':<12} {'Progress'}"
+        print(header)
+        print("    " + "─" * 70)
+        show_layers = report.layers[:10]
+        for lyr in show_layers:
+            noz_t = f"{lyr.avg_nozzle_temp}°C" if lyr.avg_nozzle_temp else "--"
+            bed_t = f"{lyr.avg_bed_temp}°C" if lyr.avg_bed_temp else "--"
+            prog = f"{lyr.avg_progress}%" if lyr.avg_progress else "--"
+            frames_range = f"{lyr.start_frame}–{lyr.end_frame}"
+            v_offset = f"{lyr.video_time_seconds:.2f}s"
+            print(f"    {lyr.layer:<8} {frames_range:<14} {v_offset:<14} {noz_t:<14} {bed_t:<12} {prog}")
+        if len(report.layers) > 10:
+            print(f"    ... and {len(report.layers) - 10} more layers")
+        print()
+

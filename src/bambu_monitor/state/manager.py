@@ -225,6 +225,13 @@ class StateManager:
                 state.temperatures.bed_target = patch.bed_target_temperature
             if patch.chamber_temperature is not None:
                 state.temperatures.chamber = patch.chamber_temperature
+            if patch.speed_magnitude is not None:
+                state.speed_magnitude = patch.speed_magnitude
+            if patch.cooling_fan_speed is not None:
+                state.cooling_fan_speed = patch.cooling_fan_speed
+            prev_speed_level = state.speed_level
+            if patch.speed_level is not None:
+                state.speed_level = patch.speed_level
 
             # 3. Last seen
             state.last_seen = patch.timestamp
@@ -356,6 +363,26 @@ class StateManager:
                         timestamp=patch.timestamp,
                     )
                     generated_events.append(layer_evt)
+
+                # Emit print.speed_changed event when speed level changes
+                if (
+                    patch.speed_level is not None
+                    and prev_speed_level is not None
+                    and patch.speed_level != prev_speed_level
+                ):
+                    speed_evt = DomainEvent.create(
+                        printer_id=printer_id,
+                        event_type="print.speed_changed",
+                        severity=EventSeverity.INFO,
+                        payload={
+                            "job_id": active_job.id,
+                            "speed_level": patch.speed_level,
+                            "prev_speed_level": prev_speed_level,
+                            "speed_magnitude": patch.speed_magnitude or state.speed_magnitude,
+                        },
+                        timestamp=patch.timestamp,
+                    )
+                    generated_events.append(speed_evt)
 
                 # State transitions for active job
                 if state.state == PrinterState.PRINTING and active_job.status == JobStatus.PREPARE:

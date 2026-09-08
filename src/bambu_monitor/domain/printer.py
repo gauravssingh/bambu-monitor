@@ -49,6 +49,9 @@ class CurrentPrinterState(BaseModel):
     state: PrinterState = PrinterState.UNKNOWN
     print: Optional[PrintJobSnapshot] = None
     temperatures: TemperatureInfo = Field(default_factory=TemperatureInfo)
+    speed_level: Optional[int] = None
+    speed_magnitude: Optional[int] = None
+    cooling_fan_speed: Optional[int] = None
     last_seen: Optional[datetime] = None
     updated_at: datetime = Field(default_factory=utc_now)
 

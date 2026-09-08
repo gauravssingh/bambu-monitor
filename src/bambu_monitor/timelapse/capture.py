@@ -7,7 +7,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from bambu_monitor.camera import CameraClient, CameraError
 from bambu_monitor.timelapse.models import TimelapseSession, TimelapseStatus, utc_now
@@ -25,6 +25,7 @@ class FrameCaptureWorker:
         camera: CameraClient,
         storage: TimelapseStorage,
         mode: str = "interval",
+        telemetry_provider: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
         on_frame_captured: Optional[Callable[[int, Path], Awaitable[None]]] = None,
         on_degraded: Optional[Callable[[str], Awaitable[None]]] = None,
         on_recovered: Optional[Callable[[], Awaitable[None]]] = None,
@@ -33,6 +34,7 @@ class FrameCaptureWorker:
         self.camera = camera
         self.storage = storage
         self.mode = mode
+        self.telemetry_provider = telemetry_provider
         self.on_frame_captured = on_frame_captured
         self.on_degraded = on_degraded
         self.on_recovered = on_recovered
@@ -153,6 +155,13 @@ class FrameCaptureWorker:
                     "reason": reason,
                     "size_bytes": len(frame_bytes),
                 }
+                if self.telemetry_provider:
+                    try:
+                        live_telem = self.telemetry_provider()
+                        if live_telem and isinstance(live_telem, dict):
+                            frame_rec.update(live_telem)
+                    except Exception as telem_exc:
+                        logger.debug("Error querying telemetry provider for frame %d: %s", sequence, telem_exc)
                 if metadata:
                     frame_rec.update(metadata)
                 self.storage.append_frame_metadata(session_dir, frame_rec)

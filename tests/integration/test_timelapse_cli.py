@@ -8,6 +8,7 @@ import pytest
 from bambu_monitor.camera.models import CameraHealth
 from bambu_monitor.cli.commands import (
     cmd_timelapse_camera_test,
+    cmd_timelapse_correlate,
     cmd_timelapse_generate,
     cmd_timelapse_list,
     cmd_timelapse_status,
@@ -201,3 +202,63 @@ async def test_cmd_timelapse_generate(cli_settings: Settings, tmp_path: Path, ca
     captured = capsys.readouterr().out
     assert "Generating timelapse video for session tl-gen-1 (2 frames)" in captured
     assert "Video compiled successfully" in captured
+
+
+@pytest.mark.asyncio
+async def test_cmd_timelapse_correlate(cli_settings: Settings, tmp_path: Path, capsys):
+    db = Database(db_path=cli_settings.database.path)
+    await db.init_db()
+    p_repo = PrinterRepository(db)
+    tl_repo = TimelapseRepository(db)
+    storage = TimelapseStorage(base_dir=cli_settings.timelapse.storage_dir)
+
+    await p_repo.save(Printer(id="printer-1", model="A1", serial_number="01P001", host="192.168.1.10"))
+
+    # 1. Nonexistent session
+    await cmd_timelapse_correlate("printer-1", "nonexistent-id", settings=cli_settings)
+    captured = capsys.readouterr().out
+    assert "Error: Timelapse session not found" in captured
+
+    # 2. Existing session with frames and telemetry
+    session_dir = tmp_path / "tl_corr_cli"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session = TimelapseSession(
+        id="tl-corr-cli-1",
+        printer_id="printer-1",
+        print_job_id="job-bench-1",
+        status=TimelapseStatus.COMPLETED,
+        frame_count=5,
+        fps=30,
+        storage_dir=str(session_dir),
+    )
+    await tl_repo.save_session(session)
+
+    # Append frames with normal temps and one with a drop
+    for i in range(1, 6):
+        storage.append_frame_metadata(session_dir, {
+            "frame": i,
+            "filename": f"{i:06d}.jpg",
+            "timestamp": datetime(2026, 9, 9, 10, 0, i * 5, tzinfo=timezone.utc).isoformat(),
+            "nozzle_temp": 185.0 if i == 3 else 220.0,
+            "nozzle_target": 220.0,
+            "bed_temp": 60.0,
+            "bed_target": 60.0,
+            "layer": 1 if i <= 3 else 2,
+            "progress": i * 20.0,
+            "speed_percent": 100,
+            "printer_state": "printing",
+        })
+
+    await cmd_timelapse_correlate("printer-1", "tl-corr-cli-1", settings=cli_settings)
+    captured = capsys.readouterr().out
+    assert "Bambu Monitor — Telemetry & Vision Correlation" in captured
+    assert "tl-corr-cli-1" in captured
+    assert "Total Frames: 5" in captured
+    assert "Hotend:     Min: 185.0°C | Max: 220.0°C" in captured
+    assert "Bed:        Min: 60.0°C | Max: 60.0°C" in captured
+    assert "Detected Anomalies (1):" in captured
+    assert "Frame 3" in captured
+    assert "Layer Breakdown (2 layers):" in captured
+    assert "1–3" in captured
+    assert "4–5" in captured
+

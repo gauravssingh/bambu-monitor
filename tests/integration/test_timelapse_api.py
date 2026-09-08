@@ -236,18 +236,36 @@ async def test_get_metadata_and_html_views(async_client: AsyncClient, tmp_path: 
     assert meta_records[0]["layer"] == 1
     assert meta_records[1]["reason"] == "interval"
 
-    # 2. View HTML endpoint
+    # 2. Correlation endpoint
+    resp_corr = await async_client.get("/api/v1/printers/test-a1/timelapses/tl-view-1/correlation")
+    assert resp_corr.status_code == 200
+    corr_data = resp_corr.json()
+    assert corr_data["total_frames"] == 2
+    assert "thermal_summary" in corr_data
+    assert "timeline" in corr_data
+    assert len(corr_data["timeline"]) == 2
+
+    # Filter out timeline
+    resp_corr_no_tl = await async_client.get("/api/v1/printers/test-a1/timelapses/tl-view-1/correlation?include_timeline=false")
+    assert resp_corr_no_tl.status_code == 200
+    assert "timeline" not in resp_corr_no_tl.json()
+
+    # 3. View HTML endpoint with HUD and SVG
     resp_view = await async_client.get("/api/v1/printers/test-a1/timelapses/tl-view-1/view")
     assert resp_view.status_code == 200
     assert "text/html" in resp_view.headers["content-type"]
     assert "tl-view-1" in resp_view.text
     assert "<video" in resp_view.text
+    assert "hud-nozzle" in resp_view.text
+    assert "timeline-svg" in resp_view.text
+    assert "correlation-data" in resp_view.text
     assert "Download MP4" in resp_view.text
 
-    # 3. Gallery HTML endpoint
+    # 4. Gallery HTML endpoint
     resp_gallery = await async_client.get("/api/v1/printers/test-a1/timelapses/gallery")
     assert resp_gallery.status_code == 200
     assert "text/html" in resp_gallery.headers["content-type"]
     assert "Timelapse Gallery" in resp_gallery.text
     assert "tl-view-1" in resp_gallery.text
+
 

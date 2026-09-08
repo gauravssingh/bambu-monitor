@@ -146,3 +146,28 @@ class TimelapseStorage:
             return records[:limit]
         return records
 
+    def append_telemetry_point(self, session_dir: Path | str, point: dict) -> Path:
+        """Append a time-series telemetry record to telemetry.jsonl."""
+        target_file = Path(session_dir) / "telemetry.jsonl"
+        with open(target_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(point) + "\n")
+        return target_file
+
+    def read_telemetry_points(self, session_dir: Path | str, limit: Optional[int] = None) -> List[dict]:
+        """Read time-series records from telemetry.jsonl if present."""
+        target_file = Path(session_dir) / "telemetry.jsonl"
+        if not target_file.is_file():
+            return []
+        records = []
+        with open(target_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        continue
+        if limit:
+            return records[:limit]
+        return records
+

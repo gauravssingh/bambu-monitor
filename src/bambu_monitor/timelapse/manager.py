@@ -248,12 +248,41 @@ class TimelapseManager:
             self.storage.save_manifest(session)
             await self._emit_timelapse_event(printer_id, "timelapse.resumed", EventSeverity.INFO, session)
 
+        def get_telemetry_snapshot() -> Optional[Dict[str, Any]]:
+            if not self.state_manager:
+                return None
+            st = self.state_manager.get_state(printer_id)
+            if not st:
+                return None
+            data: Dict[str, Any] = {
+                "nozzle_temp": round(st.temperatures.nozzle, 1),
+                "nozzle_target": round(st.temperatures.nozzle_target, 1),
+                "bed_temp": round(st.temperatures.bed, 1),
+                "bed_target": round(st.temperatures.bed_target, 1),
+                "printer_state": st.state.value if hasattr(st.state, "value") else str(st.state),
+            }
+            if st.temperatures.chamber is not None:
+                data["chamber_temp"] = round(st.temperatures.chamber, 1)
+            if st.print:
+                data["layer"] = st.print.layer
+                data["total_layers"] = st.print.total_layers
+                data["progress"] = st.print.progress
+                data["remaining_seconds"] = st.print.remaining_seconds
+            if hasattr(st, "speed_magnitude") and st.speed_magnitude is not None:
+                data["speed_percent"] = st.speed_magnitude
+            elif hasattr(st, "speed_level") and st.speed_level is not None:
+                data["speed_level"] = st.speed_level
+            if hasattr(st, "cooling_fan_speed") and st.cooling_fan_speed is not None:
+                data["cooling_fan_speed"] = st.cooling_fan_speed
+            return data
+
         cfg = self.settings.get_timelapse_config(printer_id)
         worker = FrameCaptureWorker(
             session=session,
             camera=camera,
             storage=self.storage,
             mode=cfg.capture.mode,
+            telemetry_provider=get_telemetry_snapshot,
             on_frame_captured=on_frame,
             on_degraded=on_degraded,
             on_recovered=on_recovered,

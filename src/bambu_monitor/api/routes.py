@@ -34,7 +34,7 @@ from bambu_monitor.storage.repositories import (
     PrinterRepository,
     TimelapseRepository,
 )
-from bambu_monitor.timelapse import TimelapseManager, TimelapseStorage
+from bambu_monitor.timelapse import TelemetryCorrelator, TimelapseManager, TimelapseStorage
 
 def get_state_manager(request: Request) -> StateManager:
     return request.app.state.state_manager
@@ -589,66 +589,214 @@ async def get_timelapse_metadata(
     return timelapse_storage.read_frames_metadata(session.storage_dir, limit=limit)
 
 
+@router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/correlation")
+async def get_timelapse_correlation(
+    printer_id: str,
+    timelapse_id: str,
+    include_timeline: bool = Query(default=True),
+    temp_drop_threshold: float = Query(default=10.0, ge=1.0, le=50.0),
+    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
+    timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
+    event_repo: EventRepository = Depends(get_event_repo),
+) -> Dict[str, Any]:
+    """Correlate visual frames with hotend/bed temperature, speed, layers, and anomalies."""
+    session = await timelapse_repo.get_session(timelapse_id)
+    if not session or session.printer_id != printer_id:
+        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+
+    frames_metadata = timelapse_storage.read_frames_metadata(session.storage_dir)
+    events = await event_repo.list_for_printer(printer_id, limit=250, since=session.started_at)
+    if session.completed_at:
+        events = [e for e in events if e.timestamp <= session.completed_at]
+
+    report = TelemetryCorrelator.correlate(
+        session=session,
+        frames_metadata=frames_metadata,
+        events=events,
+        temp_drop_threshold=temp_drop_threshold,
+    )
+
+    data = report.model_dump(mode="json")
+    if not include_timeline:
+        data.pop("timeline", None)
+    return data
+
+
 @router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/view", response_class=HTMLResponse)
 async def view_timelapse_html(
     printer_id: str,
     timelapse_id: str,
     timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
+    event_repo: EventRepository = Depends(get_event_repo),
 ) -> HTMLResponse:
-    """Render a dedicated, responsive HTML5 player interface for viewing the timelapse video."""
+    """Render a dedicated, responsive HTML5 player with synchronized telemetry HUD and SVG timeline."""
     session = await timelapse_repo.get_session(timelapse_id)
     if not session or session.printer_id != printer_id:
         raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
 
     video_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/video"
     gallery_url = f"/api/v1/printers/{printer_id}/timelapses/gallery"
+    corr_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/correlation"
+    meta_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/metadata"
+
     status_color = "#10b981" if session.status.value == "completed" else ("#f59e0b" if session.status.value in ("capturing", "paused") else "#ef4444")
+
+    # Run correlation
+    frames_metadata = timelapse_storage.read_frames_metadata(session.storage_dir)
+    events = await event_repo.list_for_printer(printer_id, limit=250, since=session.started_at)
+    if session.completed_at:
+        events = [e for e in events if e.timestamp <= session.completed_at]
+
+    report = TelemetryCorrelator.correlate(session=session, frames_metadata=frames_metadata, events=events)
+    report_json = json.dumps(report.model_dump(mode="json"))
+
+    # Anomalies badges HTML
+    anomalies_html = ""
+    if report.anomalies:
+        badge_items = []
+        for a in report.anomalies:
+            color = "#ef4444" if a.severity == "critical" else "#f59e0b"
+            t_str = f"{int(a.video_time_start // 60):02d}:{a.video_time_start % 60:05.2f}"
+            badge_items.append(
+                f'<button type="button" class="anomaly-btn" style="border-color: {color}; color: {color};" '
+                f'onclick="seekTo({a.video_time_start})">'
+                f'<strong>[{t_str}] Frame {a.start_frame}:</strong> {a.description}'
+                f'</button>'
+            )
+        anomalies_html = f"""
+        <div class="section-box" style="border-color: #ef444455; background: #450a0a22;">
+          <div style="font-size: 0.85rem; font-weight: 700; color: #f87171; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+            <span>⚠️ Identified Telemetry Anomalies ({len(report.anomalies)})</span>
+            <span style="font-weight: 400; font-size: 0.75rem; color: #fca5a5;">(Click to jump to timestamp)</span>
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+            {''.join(badge_items)}
+          </div>
+        </div>
+        """
+
+    # Layer jump chips HTML
+    layer_chips_html = ""
+    if len(report.layers) > 1:
+        chips = []
+        for lyr in report.layers[:25]:
+            chips.append(
+                f'<button type="button" class="layer-chip" onclick="seekTo({lyr.video_time_seconds})">'
+                f'L{lyr.layer}'
+                f'</button>'
+            )
+        if len(report.layers) > 25:
+            chips.append(f'<span style="color: #64748b; font-size: 0.75rem; align-self: center;">+{len(report.layers) - 25} more</span>')
+        layer_chips_html = f"""
+        <div style="margin-top: 1rem;">
+          <div class="stat-label">Jump to Layer</div>
+          <div style="display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.25rem;">
+            {''.join(chips)}
+          </div>
+        </div>
+        """
+
+    # Thermal stats
+    noz = report.thermal_summary.nozzle
+    noz_str = f"{noz.min}°C – {noz.max}°C (avg {noz.avg}°C)" if noz else "N/A"
+    noz_target_str = f"{noz.target}°C" if noz and noz.target else "N/A"
+
+    bed = report.thermal_summary.bed
+    bed_str = f"{bed.min}°C – {bed.max}°C (avg {bed.avg}°C)" if bed else "N/A"
+    bed_target_str = f"{bed.target}°C" if bed and bed.target else "N/A"
+
+    stability_val = report.thermal_summary.stability_score
+    stab_color = "#10b981" if stability_val >= 90 else ("#f59e0b" if stability_val >= 75 else "#ef4444")
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Timelapse — {session.id} | Bambu Monitor</title>
+  <title>Timelapse & Telemetry — {session.id} | Bambu Monitor</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ background-color: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; padding: 2rem 1rem; }}
-    .container {{ max-width: 960px; margin: 0 auto; }}
+    .container {{ max-width: 1040px; margin: 0 auto; }}
     header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }}
     a.btn, button.btn {{ display: inline-flex; align-items: center; gap: 0.5rem; background: #1e293b; color: #f8fafc; padding: 0.5rem 1rem; border-radius: 0.5rem; text-decoration: none; border: 1px solid #334155; font-size: 0.875rem; font-weight: 500; transition: background 0.15s; cursor: pointer; }}
-    a.btn:hover {{ background: #334155; }}
+    a.btn:hover, button.btn:hover {{ background: #334155; }}
     a.btn-primary {{ background: #2563eb; border-color: #3b82f6; }}
     a.btn-primary:hover {{ background: #1d4ed8; }}
     .badge {{ display: inline-block; padding: 0.25rem 0.65rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; background-color: {status_color}22; color: {status_color}; border: 1px solid {status_color}55; }}
     .video-card {{ background: #1e293b; border: 1px solid #334155; border-radius: 0.75rem; overflow: hidden; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }}
-    video {{ width: 100%; max-height: 600px; display: block; background: #000; }}
+    video {{ width: 100%; max-height: 560px; display: block; background: #000; }}
+    .hud-bar {{ background: #0b1120; border-top: 1px solid #334155; border-bottom: 1px solid #334155; padding: 0.75rem 1.25rem; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem; }}
+    .hud-item {{ display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }}
+    .hud-label {{ color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; font-weight: 600; }}
+    .hud-val {{ font-weight: 700; color: #38bdf8; font-variant-numeric: tabular-nums; }}
+    .hud-val-warn {{ color: #f87171 !important; }}
     .card-body {{ padding: 1.5rem; }}
     .title-row {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }}
+    .section-box {{ background: #0f172a; border: 1px solid #334155; border-radius: 0.5rem; padding: 1rem; margin-top: 1rem; }}
+    .anomaly-btn {{ background: #1e293b; border: 1px solid; border-radius: 0.375rem; padding: 0.4rem 0.75rem; font-size: 0.78rem; text-align: left; cursor: pointer; transition: transform 0.1s, background 0.15s; }}
+    .anomaly-btn:hover {{ transform: translateY(-1px); background: #334155; }}
+    .layer-chip {{ background: #0f172a; color: #94a3b8; border: 1px solid #334155; border-radius: 0.25rem; padding: 0.2rem 0.5rem; font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: all 0.15s; }}
+    .layer-chip:hover {{ background: #2563eb; color: #fff; border-color: #3b82f6; }}
+    .chart-container {{ position: relative; margin-top: 0.5rem; width: 100%; height: 140px; cursor: crosshair; }}
+    svg.timeline-svg {{ width: 100%; height: 100%; display: block; }}
     .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #334155; }}
     .stat-box {{ background: #0f172a; padding: 0.75rem 1rem; border-radius: 0.5rem; border: 1px solid #1e293b; }}
     .stat-label {{ font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; font-weight: 600; margin-bottom: 0.25rem; }}
-    .stat-value {{ font-size: 1.125rem; font-weight: 700; color: #f8fafc; }}
+    .stat-value {{ font-size: 1.1rem; font-weight: 700; color: #f8fafc; }}
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <div>
-        <h1 style="font-size: 1.5rem; font-weight: 700;">Print Timelapse</h1>
+        <h1 style="font-size: 1.5rem; font-weight: 700;">Print Timelapse & Telemetry</h1>
         <p style="color: #94a3b8; font-size: 0.875rem;">Printer: <strong>{printer_id}</strong> &bull; Job: {session.print_job_id}</p>
       </div>
-      <div style="display: flex; gap: 0.5rem;">
-        <a href="{gallery_url}" class="btn">&larr; All Timelapses</a>
+      <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+        <a href="{gallery_url}" class="btn">&larr; Gallery</a>
+        <a href="{corr_url}" target="_blank" class="btn">&#128269; Correlation JSON</a>
+        <a href="{meta_url}" target="_blank" class="btn">&#128196; Frames Dataset</a>
         <a href="{video_url}" download class="btn btn-primary">&darr; Download MP4</a>
       </div>
     </header>
 
     <div class="video-card">
-      <video controls autoplay loop playsinline>
+      <video id="tl-video" controls autoplay loop playsinline>
         <source src="{video_url}" type="video/mp4">
         Your browser does not support HTML5 video playback.
       </video>
+
+      <!-- Live Reactive Telemetry HUD -->
+      <div class="hud-bar">
+        <div class="hud-item">
+          <span class="hud-label">🔥 Hotend:</span>
+          <span id="hud-nozzle" class="hud-val">--</span>
+          <span style="color: #64748b; font-size: 0.75rem;">/ <span id="hud-nozzle-target">--</span>°C</span>
+        </div>
+        <div class="hud-item">
+          <span class="hud-label">🛏️ Bed:</span>
+          <span id="hud-bed" class="hud-val">--</span>
+          <span style="color: #64748b; font-size: 0.75rem;">/ <span id="hud-bed-target">--</span>°C</span>
+        </div>
+        <div class="hud-item">
+          <span class="hud-label">📐 Layer:</span>
+          <span id="hud-layer" class="hud-val" style="color: #a78bfa;">--</span>
+        </div>
+        <div class="hud-item">
+          <span class="hud-label">📊 Progress:</span>
+          <span id="hud-progress" class="hud-val" style="color: #34d399;">--</span>
+        </div>
+        <div class="hud-item">
+          <span class="hud-label">⚡ Speed:</span>
+          <span id="hud-speed" class="hud-val" style="color: #fbbf24;">--</span>
+        </div>
+        <div class="hud-item" id="hud-anomaly-box" style="display: none;">
+          <span id="hud-anomaly-tag" class="badge" style="background-color: #ef444422; color: #f87171; border-color: #ef444488;">ANOMALY</span>
+        </div>
+      </div>
+
       <div class="card-body">
         <div class="title-row">
           <div>
@@ -658,22 +806,56 @@ async def view_timelapse_html(
           <span class="badge">{session.status.value}</span>
         </div>
 
+        {anomalies_html}
+
+        <!-- Interactive SVG Temperature Chart -->
+        <div class="section-box">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+            <div class="stat-label">Synchronized Temperature Profile (Click timeline to scrub video)</div>
+            <div style="font-size: 0.75rem; display: flex; gap: 0.75rem;">
+              <span style="color: #f97316;">&bull; Hotend</span>
+              <span style="color: #38bdf8;">&bull; Bed</span>
+              <span style="color: #ef4444;">&bull; Anomaly Range</span>
+            </div>
+          </div>
+          <div class="chart-container" id="chart-container">
+            <svg id="timeline-svg" class="timeline-svg" preserveAspectRatio="none" viewBox="0 0 1000 120">
+              <!-- Grid background -->
+              <line x1="0" y1="20" x2="1000" y2="20" stroke="#334155" stroke-dasharray="2 2" stroke-width="0.5"/>
+              <line x1="0" y1="60" x2="1000" y2="60" stroke="#334155" stroke-dasharray="2 2" stroke-width="0.5"/>
+              <line x1="0" y1="100" x2="1000" y2="100" stroke="#334155" stroke-dasharray="2 2" stroke-width="0.5"/>
+              <g id="svg-anomalies"></g>
+              <polyline id="svg-nozzle-target" fill="none" stroke="#64748b" stroke-dasharray="3 3" stroke-width="1"/>
+              <polyline id="svg-bed-line" fill="none" stroke="#38bdf8" stroke-width="2"/>
+              <polyline id="svg-nozzle-line" fill="none" stroke="#f97316" stroke-width="2"/>
+              <line id="svg-scrub-line" x1="0" y1="0" x2="0" y2="120" stroke="#f8fafc" stroke-width="2"/>
+            </svg>
+          </div>
+        </div>
+
+        {layer_chips_html}
+
+        <!-- Thermal Performance & Session Metrics -->
         <div class="stats-grid">
           <div class="stat-box">
-            <div class="stat-label">Frames</div>
-            <div class="stat-value">{session.frame_count:,}</div>
+            <div class="stat-label">Hotend Range</div>
+            <div class="stat-value" style="color: #f97316;">{noz_str}</div>
           </div>
           <div class="stat-box">
-            <div class="stat-label">Framerate</div>
-            <div class="stat-value">{session.video_fps} FPS</div>
+            <div class="stat-label">Bed Range</div>
+            <div class="stat-value" style="color: #38bdf8;">{bed_str}</div>
           </div>
           <div class="stat-box">
-            <div class="stat-label">Interval</div>
+            <div class="stat-label">Thermal Stability</div>
+            <div class="stat-value" style="color: {stab_color};">{stability_val} / 100</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Frames / FPS</div>
+            <div class="stat-value">{session.frame_count:,} ({session.video_fps} FPS)</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Capture Interval</div>
             <div class="stat-value">{session.capture_interval_seconds}s</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-label">Paused Time</div>
-            <div class="stat-value">{int(session.paused_seconds)}s</div>
           </div>
           <div class="stat-box">
             <div class="stat-label">Missed Frames</div>
@@ -683,6 +865,126 @@ async def view_timelapse_html(
       </div>
     </div>
   </div>
+
+  <script id="correlation-data" type="application/json">
+  {report_json}
+  </script>
+
+  <script>
+    const reportData = JSON.parse(document.getElementById('correlation-data').textContent);
+    const video = document.getElementById('tl-video');
+    const scrubLine = document.getElementById('svg-scrub-line');
+    const chartContainer = document.getElementById('chart-container');
+    const hudNozzle = document.getElementById('hud-nozzle');
+    const hudNozzleTarget = document.getElementById('hud-nozzle-target');
+    const hudBed = document.getElementById('hud-bed');
+    const hudBedTarget = document.getElementById('hud-bed-target');
+    const hudLayer = document.getElementById('hud-layer');
+    const hudProgress = document.getElementById('hud-progress');
+    const hudSpeed = document.getElementById('hud-speed');
+    const hudAnomalyBox = document.getElementById('hud-anomaly-box');
+    const hudAnomalyTag = document.getElementById('hud-anomaly-tag');
+
+    const timeline = reportData.timeline || [];
+    const totalFrames = reportData.total_frames || timeline.length;
+    const duration = reportData.video_duration_seconds || (video.duration || 1);
+
+    // Draw SVG polylines
+    if (timeline.length > 1) {{
+      const maxTemp = 280; // normalize 0-280 C to 120-0 Y
+      const ptsNozzle = [];
+      const ptsBed = [];
+      const ptsNozzleTarget = [];
+
+      timeline.forEach((pt, i) => {{
+        const x = (i / (timeline.length - 1)) * 1000;
+        const nozY = pt.nozzle_temp != null ? 120 - (pt.nozzle_temp / maxTemp) * 120 : 120;
+        const bedY = pt.bed_temp != null ? 120 - (pt.bed_temp / maxTemp) * 120 : 120;
+        const nozTarY = pt.nozzle_target != null ? 120 - (pt.nozzle_target / maxTemp) * 120 : 120;
+
+        ptsNozzle.push(`${{x.toFixed(1)}},${{nozY.toFixed(1)}}`);
+        ptsBed.push(`${{x.toFixed(1)}},${{bedY.toFixed(1)}}`);
+        ptsNozzleTarget.push(`${{x.toFixed(1)}},${{nozTarY.toFixed(1)}}`);
+      }});
+
+      document.getElementById('svg-nozzle-line').setAttribute('points', ptsNozzle.join(' '));
+      document.getElementById('svg-bed-line').setAttribute('points', ptsBed.join(' '));
+      document.getElementById('svg-nozzle-target').setAttribute('points', ptsNozzleTarget.join(' '));
+
+      // Draw anomaly bands
+      const anomG = document.getElementById('svg-anomalies');
+      (reportData.anomalies || []).forEach(anom => {{
+        const startX = ((anom.start_frame - 1) / Math.max(1, totalFrames - 1)) * 1000;
+        const endFrame = anom.end_frame || anom.start_frame;
+        const endX = ((endFrame - 1) / Math.max(1, totalFrames - 1)) * 1000;
+        const width = Math.max(6, endX - startX);
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', startX.toFixed(1));
+        rect.setAttribute('y', '0');
+        rect.setAttribute('width', width.toFixed(1));
+        rect.setAttribute('height', '120');
+        rect.setAttribute('fill', anom.severity === 'critical' ? 'rgba(239, 68, 68, 0.35)' : 'rgba(245, 158, 11, 0.3)');
+        anomG.appendChild(rect);
+      }});
+    }}
+
+    // Real-time HUD update on video playback
+    video.addEventListener('timeupdate', () => {{
+      const curTime = video.currentTime;
+      const curDuration = video.duration || duration || 1;
+      const progressRatio = Math.min(1.0, Math.max(0.0, curTime / curDuration));
+
+      // Update scrub line
+      scrubLine.setAttribute('x1', (progressRatio * 1000).toFixed(1));
+      scrubLine.setAttribute('x2', (progressRatio * 1000).toFixed(1));
+
+      // Find timeline point
+      if (timeline.length > 0) {{
+        const frameIdx = Math.min(timeline.length - 1, Math.floor(progressRatio * timeline.length));
+        const pt = timeline[frameIdx];
+        if (pt) {{
+          hudNozzle.textContent = pt.nozzle_temp != null ? `${{pt.nozzle_temp}}°C` : '--';
+          hudNozzleTarget.textContent = pt.nozzle_target != null ? pt.nozzle_target : '--';
+          hudBed.textContent = pt.bed_temp != null ? `${{pt.bed_temp}}°C` : '--';
+          hudBedTarget.textContent = pt.bed_target != null ? pt.bed_target : '--';
+          hudLayer.textContent = pt.layer != null ? `Layer ${{pt.layer}}` : '--';
+          hudProgress.textContent = pt.progress != null ? `${{pt.progress}}%` : '--';
+          
+          // Speed
+          const spdNames = {{1: '100% Standard', 2: '50% Silent', 3: '124% Sport', 4: '166% Ludicrous'}};
+          hudSpeed.textContent = pt.speed_percent != null ? `${{pt.speed_percent}}%` : (spdNames[pt.speed_level] || '--');
+
+          // Thermal drop alert warning
+          if (pt.nozzle_temp != null && pt.nozzle_target != null && pt.nozzle_target >= 100 && (pt.nozzle_target - pt.nozzle_temp) >= 10) {{
+            hudNozzle.classList.add('hud-val-warn');
+          }} else {{
+            hudNozzle.classList.remove('hud-val-warn');
+          }}
+
+          // Anomaly badge
+          if (pt.anomaly_ids && pt.anomaly_ids.length > 0) {{
+            hudAnomalyBox.style.display = 'flex';
+            hudAnomalyTag.textContent = `⚠️ ANOMALY (${{pt.anomaly_ids.join(', ')}})`;
+          }} else {{
+            hudAnomalyBox.style.display = 'none';
+          }}
+        }}
+      }}
+    }});
+
+    // Click SVG chart to scrub video
+    chartContainer.addEventListener('click', (e) => {{
+      const rect = chartContainer.getBoundingClientRect();
+      const clickRatio = Math.max(0.0, Math.min(1.0, (e.clientX - rect.left) / rect.width));
+      const targetTime = clickRatio * (video.duration || duration);
+      seekTo(targetTime);
+    }});
+
+    function seekTo(seconds) {{
+      video.currentTime = Math.max(0, seconds);
+      video.play();
+    }}
+  </script>
 </body>
 </html>
 """

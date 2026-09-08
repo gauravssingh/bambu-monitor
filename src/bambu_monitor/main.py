@@ -26,6 +26,7 @@ from bambu_monitor.cli.commands import (
     cmd_service_stop,
     cmd_status,
     cmd_timelapse_camera_test,
+    cmd_timelapse_correlate,
     cmd_timelapse_generate,
     cmd_timelapse_list,
     cmd_timelapse_status,
@@ -170,6 +171,11 @@ def build_parser() -> argparse.ArgumentParser:
     tl_gen = tl_sub.add_parser("generate", help="Generate or re-compile MP4 video from existing frames")
     tl_gen.add_argument("job_id", help="Print Job ID or Timelapse Session ID")
 
+    tl_corr = tl_sub.add_parser("correlate", help="Correlate print telemetry (temperatures, speed, layers) with visual frames")
+    tl_corr.add_argument("printer_id", help="Printer ID")
+    tl_corr.add_argument("timelapse_id", nargs="?", default=None, help="Optional Timelapse Session ID or Print Job ID (defaults to latest)")
+    tl_corr.add_argument("--temp-drop-threshold", type=float, default=10.0, help="Temperature drop threshold in °C below target (default: 10.0)")
+
     return parser
 
 
@@ -271,6 +277,15 @@ def main() -> None:
             asyncio.run(cmd_timelapse_camera_test(printer_id=args.printer_id, settings=settings))
         elif action == "generate":
             asyncio.run(cmd_timelapse_generate(job_or_session_id=args.job_id, settings=settings))
+        elif action == "correlate":
+            asyncio.run(
+                cmd_timelapse_correlate(
+                    printer_id=args.printer_id,
+                    timelapse_id=args.timelapse_id,
+                    temp_drop_threshold=args.temp_drop_threshold,
+                    settings=settings,
+                )
+            )
         else:
             parser.parse_args(["timelapse", "--help"])
 
