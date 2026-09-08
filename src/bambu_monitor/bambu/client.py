@@ -96,6 +96,14 @@ class BambuMqttClient:
             logger.info("Connected to Bambu printer %s (%s) at %s:%d", self.printer_id, self.serial_number, self.host, self.port)
             self._connected = True
 
+            # Mark online in state manager
+            if self.state_manager:
+                online_patch = TelemetryPatch(printer_id=self.printer_id, online=True)
+                asyncio.run_coroutine_threadsafe(
+                    self.state_manager.apply_patch(online_patch),
+                    self.loop,
+                )
+
             # 1. Subscribe to report topic
             report_topic = get_report_topic(self.serial_number)
             client.subscribe(report_topic)
@@ -122,6 +130,8 @@ class BambuMqttClient:
         try:
             raw_payload = json.loads(msg.payload.decode("utf-8", errors="ignore"))
             patch = TelemetryPatch.from_raw(self.printer_id, raw_payload)
+            if patch.online is None:
+                patch.online = True
             # Route patch thread-safely into Phase 1 state manager
             if self.state_manager:
                 asyncio.run_coroutine_threadsafe(
