@@ -50,7 +50,6 @@ class WebhookClient:
         if self.secret:
             sig = hmac.new(self.secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
             headers["X-Hub-Signature-256"] = f"sha256={sig}"
-            headers["X-Gitlab-Token"] = self.secret
 
         if headers_override:
             headers.update(headers_override)

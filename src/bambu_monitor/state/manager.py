@@ -21,7 +21,7 @@ from bambu_monitor.domain.printer import (
     PrintJobSnapshot,
     TemperatureInfo,
 )
-from bambu_monitor.domain.print_job import JobStatus, PrintJob
+from bambu_monitor.domain.print_job import JobStatus, PrintJob, sanitize_filename
 from bambu_monitor.domain.telemetry import TelemetryPatch
 from bambu_monitor.storage.repositories import (
     AlertRepository,
@@ -111,20 +111,55 @@ class StateManager:
 
     async def _emit_event(self, event: DomainEvent) -> None:
         """Persist event, enqueue to outbox, and broadcast to SSE subscribers."""
-        # 1. Persist to events table
-        await self.event_repo.save(event)
+        if event.event_type in {
+            "filament.runout",
+            "filament.runout_cleared",
+            "print.possible_blockage",
+            "print.failed",
+            "print.paused",
+        }:
+            printer_cfg = next((p for p in self.settings.printers if p.id == event.printer_id), None)
+            if printer_cfg and printer_cfg.camera and printer_cfg.camera.enabled and printer_cfg.camera.rtsp_url:
+                base_url = self.settings.application.public_base_url.rstrip("/")
+                event.payload.setdefault(
+                    "camera_snapshot_url",
+                    f"{base_url}/api/v1/printers/{event.printer_id}/camera/snapshot",
+                )
 
-        # 2. Enqueue to outbox for reliable delivery
+        # 1. Persist event and enqueue delivery in one SQLite transaction.
         destination = self.settings.events.delivery.endpoint
-        await self.outbox_repo.enqueue(event, destination)
+        await self.event_repo.save_and_enqueue(event, destination)
 
-        # 3. Broadcast to SSE subscribers
+        # 2. Broadcast to SSE subscribers
         queues = self._subscribers.get(event.printer_id, set())
         for q in list(queues):
             try:
                 q.put_nowait(event)
             except Exception as e:
                 logger.debug("Failed to put event into SSE queue: %s", e)
+
+    @staticmethod
+    def _job_identity_changed(job: PrintJob, patch: TelemetryPatch) -> bool:
+        """Return true when a printer report identifies a different print."""
+        metadata = job.metadata
+        for field in ("subtask_id", "task_id"):
+            incoming = getattr(patch, field)
+            existing = metadata.get(field)
+            if incoming and existing and incoming != existing:
+                return True
+        if patch.subtask_name and sanitize_filename(patch.subtask_name) != sanitize_filename(job.filename):
+            return True
+        return False
+
+    async def _supersede_job(self, job: PrintJob, patch: TelemetryPatch) -> None:
+        """Close stale persisted state without emitting a false failure alert."""
+        job.transition_to(JobStatus.FAILED, patch.timestamp)
+        job.metadata["superseded_by"] = {
+            "subtask_id": patch.subtask_id,
+            "task_id": patch.task_id,
+            "filename": patch.subtask_name,
+        }
+        await self.job_repo.save(job)
 
     async def apply_patch(self, patch: TelemetryPatch) -> List[DomainEvent]:
         """Core pipeline: Merge patch into in-memory state, evaluate lifecycles, and emit events."""
@@ -178,6 +213,12 @@ class StateManager:
             # 5. Print Job Lifecycle Tracking
             active_job = self._active_jobs.get(printer_id)
 
+            if active_job and self._job_identity_changed(active_job, patch):
+                await self._supersede_job(active_job, patch)
+                self._active_jobs.pop(printer_id, None)
+                self._last_progress_marker.pop(printer_id, None)
+                active_job = None
+
             # Check if a new print job should start
             if active_job is None:
                 is_starting = state.state in (PrinterState.PREPARING, PrinterState.PRINTING)
@@ -193,6 +234,10 @@ class StateManager:
                         layer=patch.layer or 0,
                         total_layers=patch.total_layers or 0,
                         remaining_seconds=patch.remaining_seconds,
+                        metadata={
+                            "task_id": patch.task_id,
+                            "subtask_id": patch.subtask_id,
+                        },
                     )
                     self._active_jobs[printer_id] = active_job
                     await self.job_repo.save(active_job)
@@ -279,14 +324,17 @@ class StateManager:
                 elif state.state == PrinterState.PAUSED and active_job.status != JobStatus.PAUSED:
                     active_job.transition_to(JobStatus.PAUSED, patch.timestamp)
                     await self.job_repo.save(active_job)
-                    evt = DomainEvent.create(
-                        printer_id=printer_id,
-                        event_type="print.paused",
-                        severity=EventSeverity.WARNING,
-                        payload={"job_id": active_job.id, "progress": active_job.progress},
-                        timestamp=patch.timestamp,
-                    )
-                    generated_events.append(evt)
+                    # A confirmed runout is a more specific pause reason and
+                    # must generate one notification, not pause + runout.
+                    if patch.filament_runout is not True:
+                        evt = DomainEvent.create(
+                            printer_id=printer_id,
+                            event_type="print.paused",
+                            severity=EventSeverity.WARNING,
+                            payload={"job_id": active_job.id, "progress": active_job.progress},
+                            timestamp=patch.timestamp,
+                        )
+                        generated_events.append(evt)
 
                 elif state.state == PrinterState.PRINTING and active_job.status == JobStatus.PAUSED:
                     active_job.transition_to(JobStatus.RUNNING, patch.timestamp)
@@ -363,13 +411,71 @@ class StateManager:
             else:
                 state.print = None
 
-            # 7. Adaptive Multi-Factor Stall Detection
+            # 7. Filament runout alert lifecycle
+            runout_alerts = self._active_alerts.setdefault(printer_id, {})
+            runout_alert = runout_alerts.get("filament.runout")
+            if (
+                patch.filament_runout is True
+                and active_job is not None
+                and state.state == PrinterState.PAUSED
+                and runout_alert is None
+            ):
+                details = {
+                    "job_id": active_job.id if active_job else None,
+                    "filename": active_job.filename if active_job else None,
+                    "progress": active_job.progress if active_job else None,
+                    "layer": active_job.layer if active_job else None,
+                    **patch.filament_runout_details,
+                }
+                runout_alert = Alert.create(
+                    printer_id=printer_id,
+                    alert_type="filament.runout",
+                    severity=AlertSeverity.CRITICAL,
+                    details=details,
+                    created_at=patch.timestamp,
+                )
+                runout_alerts["filament.runout"] = runout_alert
+                await self.alert_repo.save(runout_alert)
+                generated_events.append(
+                    DomainEvent.create(
+                        printer_id=printer_id,
+                        event_type="filament.runout",
+                        severity=EventSeverity.CRITICAL,
+                        payload={
+                            "alert_id": runout_alert.id,
+                            "alert_type": runout_alert.alert_type,
+                            **details,
+                        },
+                        timestamp=patch.timestamp,
+                    )
+                )
+            elif (
+                runout_alert is not None
+                and (patch.filament_runout is False or state.state == PrinterState.PRINTING)
+            ):
+                runout_alert.resolve(patch.timestamp)
+                await self.alert_repo.save(runout_alert)
+                runout_alerts.pop("filament.runout", None)
+                generated_events.append(
+                    DomainEvent.create(
+                        printer_id=printer_id,
+                        event_type="filament.runout_cleared",
+                        severity=EventSeverity.INFO,
+                        payload={
+                            "alert_id": runout_alert.id,
+                            "job_id": active_job.id if active_job else None,
+                        },
+                        timestamp=patch.timestamp,
+                    )
+                )
+
+            # 8. Adaptive Multi-Factor Stall Detection
             if self.settings.detection.stall.enabled and active_job and active_job.status == JobStatus.RUNNING:
                 stall_event = await self._evaluate_stall_detection(printer_id, active_job, patch.timestamp)
                 if stall_event:
                     generated_events.append(stall_event)
 
-            # 8. Emit all generated events
+            # 9. Emit all generated events
             for evt in generated_events:
                 await self._emit_event(evt)
 

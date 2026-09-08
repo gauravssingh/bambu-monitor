@@ -179,7 +179,7 @@ bambu-monitor
 Bambu Monitor integrates with **Hermes** to push real-time notifications to your **Telegram bot** for critical 3D printer events:
 * **Print Completion**: When a job finishes, reporting duration and layer stats.
 * **Blockage & Stalls**: When nozzle temperature is stable but zero progress occurs over the stall threshold.
-* **Filament Runout**: When AMS / spool sensors report filament empty.
+* **Filament Runout**: When the active AMS / virtual tray reports filament empty (`filament.runout`).
 * **Printer Failures**: When print is aborted or encounters hardware HMS fault codes.
 * **Print Pauses**: When print is paused manually or by safety sensors.
 
@@ -190,6 +190,8 @@ events:
     enabled: true
     endpoint: ${EVENT_ENDPOINT:http://localhost:8644/webhooks/bambu-printer}
     secret: ${EVENT_SECRET:bambu-secret-8f92a4e7c10b42d591}
+    # Hermes must be able to reach this URL to fetch alert snapshots.
+    # public_base_url: ${BAMBU_MONITOR_PUBLIC_URL:http://localhost:8000}
     timeout_seconds: 10
     retry_attempts: 5
     initial_backoff_seconds: 2.0
@@ -207,12 +209,14 @@ events:
       "print.failed",
       "print.paused",
       "print.resumed",
-      "alert.created",
-      "alert.resolved",
+      "filament.runout",
+      "filament.runout_cleared",
+      "print.possible_blockage",
+      "print.blockage_cleared",
       "print.started"
     ],
     "secret": "bambu-secret-8f92a4e7c10b42d591",
-    "prompt": "Bambu 3D Printer Event: {event_type}\nPrinter: {source}\nSeverity: {severity}\n\nEvent details:\n{__raw__}\n\nPlease send a concise, clear status update to Telegram.",
+    "prompt": "Bambu 3D Printer Event: {event_type}\nPrinter: {source}\nSeverity: {severity}\n\nEvent details:\n{__raw__}\n\nFor alert-like events, download the fresh snapshot from {camera_snapshot_url} and send it to Telegram using MEDIA:/tmp/bambu_alert.jpg. Then send a concise, clear status update.",
     "deliver": "telegram",
     "deliver_extra": {
       "chat_id": "1117425083"

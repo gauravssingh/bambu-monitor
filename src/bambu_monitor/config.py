@@ -33,6 +33,9 @@ class ApplicationConfig(BaseModel):
     log_level: str = "INFO"
     auto_connect_mqtt: bool = True
     enable_discovery: bool = True
+    public_base_url: str = "http://localhost:8000"
+    api_token: Optional[str] = None
+    allow_unauthenticated_loopback: bool = True
 
 
 class DatabaseConfig(BaseModel):

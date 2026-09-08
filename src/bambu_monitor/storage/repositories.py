@@ -296,6 +296,46 @@ class EventRepository:
         finally:
             await conn.close()
 
+    async def save_and_enqueue(self, event: DomainEvent, destination: str) -> None:
+        """Atomically persist an event and its durable delivery work item."""
+        conn = await self.db.get_connection()
+        try:
+            await conn.execute("BEGIN")
+            await conn.execute(
+                """
+                INSERT INTO events (event_id, printer_id, event_type, severity, timestamp, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_id) DO NOTHING
+                """,
+                (
+                    event.event_id,
+                    event.printer_id,
+                    event.event_type,
+                    event.severity.value,
+                    format_datetime(event.timestamp),
+                    json.dumps(event.payload),
+                ),
+            )
+            await conn.execute(
+                """
+                INSERT INTO outbox (event_id, printer_id, destination, payload_json, status, attempts, created_at)
+                VALUES (?, ?, ?, ?, 'pending', 0, ?)
+                """,
+                (
+                    event.event_id,
+                    event.printer_id,
+                    destination,
+                    json.dumps(event.model_dump(mode="json")),
+                    format_datetime(event.timestamp),
+                ),
+            )
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
+        finally:
+            await conn.close()
+
     async def get_by_event_id(self, event_id: str) -> Optional[DomainEvent]:
         conn = await self.db.get_connection()
         try:

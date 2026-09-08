@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--host",
-        help="HTTP server bind host (default: 0.0.0.0)",
+        help="HTTP server bind host (default: 127.0.0.1)",
         default=None,
     )
     parser.add_argument(
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 1. run (daemon mode)
     run_parser = subparsers.add_parser("run", help="Start Bambu Monitor daemon service")
-    run_parser.add_argument("--host", default="0.0.0.0", help="HTTP server bind host (default: 0.0.0.0)")
+    run_parser.add_argument("--host", default="127.0.0.1", help="HTTP server bind host (default: 127.0.0.1)")
     run_parser.add_argument("--port", type=int, default=8000, help="HTTP server bind port (default: 8000)")
 
     # 2. discover
@@ -123,13 +123,13 @@ def build_parser() -> argparse.ArgumentParser:
     svc_sub = svc_parser.add_subparsers(dest="service_action")
 
     svc_start = svc_sub.add_parser("start", help="Start Bambu Monitor daemon in background")
-    svc_start.add_argument("--host", default="0.0.0.0", help="HTTP server bind host")
+    svc_start.add_argument("--host", default="127.0.0.1", help="HTTP server bind host")
     svc_start.add_argument("--port", type=int, default=8000, help="HTTP server bind port")
 
     svc_sub.add_parser("stop", help="Stop running background daemon")
 
     svc_restart = svc_sub.add_parser("restart", help="Restart background daemon")
-    svc_restart.add_argument("--host", default="0.0.0.0", help="HTTP server bind host")
+    svc_restart.add_argument("--host", default="127.0.0.1", help="HTTP server bind host")
     svc_restart.add_argument("--port", type=int, default=8000, help="HTTP server bind port")
 
     svc_status = svc_sub.add_parser("status", help="Check status of background service")
@@ -179,7 +179,7 @@ def main() -> None:
     cmd = args.command
 
     if cmd is None or cmd == "run":
-        bind_host = getattr(args, "host", None) or "0.0.0.0"
+        bind_host = getattr(args, "host", None) or "127.0.0.1"
         bind_port = getattr(args, "port", None) or 8000
         run_daemon(args.config_path, bind_host, bind_port, args.log_level)
 

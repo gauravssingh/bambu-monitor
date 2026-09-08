@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -32,9 +33,6 @@ from bambu_monitor.storage.repositories import (
     PrinterRepository,
 )
 
-router = APIRouter()
-
-
 def get_state_manager(request: Request) -> StateManager:
     return request.app.state.state_manager
 
@@ -61,6 +59,25 @@ def get_event_repo(request: Request) -> EventRepository:
 
 def get_outbox_repo(request: Request) -> OutboxRepository:
     return request.app.state.outbox_repo
+
+
+async def require_api_access(request: Request) -> None:
+    """Restrict the local control plane to loopback or a configured API token."""
+    settings = request.app.state.settings
+    configured_token = settings.application.api_token
+    presented_token = request.headers.get("X-API-Key", "")
+    if configured_token:
+        if hmac.compare_digest(presented_token, configured_token):
+            return
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+
+    client_host = request.client.host if request.client else None
+    if settings.application.allow_unauthenticated_loopback and client_host in {None, "127.0.0.1", "::1", "testclient"}:
+        return
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Local access only")
+
+
+router = APIRouter(dependencies=[Depends(require_api_access)])
 
 
 # --- System & Health ---
@@ -334,4 +351,3 @@ async def get_camera_snapshot(printer_id: str, request: Request) -> Response:
         raise HTTPException(status_code=400, detail=str(exc))
     except CameraError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-

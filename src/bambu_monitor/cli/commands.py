@@ -13,6 +13,7 @@ import ssl
 import sys
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 from bambu_monitor.bambu.credentials import (
     delete_access_code,
@@ -309,6 +310,43 @@ async def cmd_doctor(settings: Optional[Settings] = None) -> None:
         else:
             print("  Access Code           ✗ Missing! Run 'bambu-monitor credentials <id>'")
 
+        camera_cfg = next((c for c in cfg.printers if c.id == p.id), None)
+        if not camera_cfg or not camera_cfg.camera or not camera_cfg.camera.enabled:
+            print("  Camera                ! Not configured/enabled")
+        elif not camera_cfg.camera.rtsp_url:
+            print("  Camera                ✗ RTSP URL missing (set A1_MINI_CAMERA_RTSP)")
+        else:
+            try:
+                camera = CameraClient(camera_cfg.camera, printer_id=p.id)
+                diag = await camera.test_connection()
+                if diag.get("connected"):
+                    print(
+                        f"  Camera                ✓ RTSP snapshot ({diag.get('snapshot_latency_ms')} ms, "
+                        f"{diag.get('resolution') or 'resolution unavailable'})"
+                    )
+                else:
+                    print(f"  Camera                ✗ {diag.get('error')}")
+            except Exception as exc:
+                print(f"  Camera                ✗ {exc}")
+
+    delivery = cfg.events.delivery
+    parsed_endpoint = urlparse(delivery.endpoint)
+    if delivery.enabled and parsed_endpoint.hostname:
+        try:
+            port = parsed_endpoint.port or (443 if parsed_endpoint.scheme == "https" else 80)
+            sock = socket.create_connection((parsed_endpoint.hostname, port), timeout=2.0)
+            sock.close()
+            print(f"\nHermes Webhook          ✓ TCP reachable ({delivery.endpoint})")
+        except Exception as exc:
+            print(f"\nHermes Webhook          ✗ Unreachable ({delivery.endpoint}): {exc}")
+    elif not delivery.enabled:
+        print("\nHermes Webhook          ! Delivery disabled")
+    else:
+        print(f"\nHermes Webhook          ✗ Invalid endpoint: {delivery.endpoint}")
+
+    print(f"Outbox Delivery         {'✓ Enabled' if delivery.enabled else '✗ Disabled'}")
+    print(f"Snapshot Base URL       {cfg.application.public_base_url}")
+
     print()
 
 
@@ -427,7 +465,7 @@ def _get_running_pid() -> Optional[int]:
     return None
 
 
-async def cmd_service_start(host: str = "0.0.0.0", port: int = 8000, config_path: Optional[str] = None) -> None:
+async def cmd_service_start(host: str = "127.0.0.1", port: int = 8000, config_path: Optional[str] = None) -> None:
     """Start Bambu Monitor daemon as a background service."""
     import subprocess
     import time
@@ -546,7 +584,7 @@ async def cmd_service_status(port: int = 8000) -> None:
         print(f"  API Status:   ○ Not responding ({exc})")
 
 
-async def cmd_service_restart(host: str = "0.0.0.0", port: int = 8000, config_path: Optional[str] = None) -> None:
+async def cmd_service_restart(host: str = "127.0.0.1", port: int = 8000, config_path: Optional[str] = None) -> None:
     """Restart Bambu Monitor daemon."""
     await cmd_service_stop()
     await asyncio.sleep(1.0)
@@ -660,5 +698,3 @@ async def cmd_camera_test(
     if diag.get("fps"):
         print(f"  ✓ Framerate:              {diag['fps']}")
     print("\nCamera stream is verified and ready for monitoring!\n")
-
-

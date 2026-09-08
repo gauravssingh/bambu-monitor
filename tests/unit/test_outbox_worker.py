@@ -39,7 +39,7 @@ async def test_webhook_client_hmac_and_headers():
         assert called_headers["X-Event-ID"] == "evt_test123"
         assert called_headers["X-Event-Type"] == "print.completed"
         assert called_headers["X-Printer-ID"] == "bambu-a1"
-        assert called_headers["X-Gitlab-Token"] == "test-secret-key"
+        assert "X-Gitlab-Token" not in called_headers
         assert "X-Hub-Signature-256" in called_headers
         assert called_headers["X-Hub-Signature-256"].startswith("sha256=")
 

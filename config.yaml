@@ -2,6 +2,8 @@ application:
   name: bambu-monitor
   environment: development
   log_level: INFO
+  public_base_url: ${BAMBU_MONITOR_PUBLIC_URL:http://localhost:8000}
+  api_token: ${BAMBU_MONITOR_API_TOKEN:}
 
 database:
   path: ./data/bambu.db

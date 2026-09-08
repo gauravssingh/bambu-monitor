@@ -6,6 +6,45 @@ from bambu_monitor.domain.printer import PrinterState
 from bambu_monitor.domain.telemetry import TelemetryPatch
 
 
+def test_telemetry_does_not_treat_tray_remain_as_a_runout_sensor():
+    patch = TelemetryPatch.from_raw(
+        "test-a1",
+        {"print": {"ams": {"tray_now": "0", "ams": [{"tray": [{"id": "0", "remain": 0}]}]}}},
+    )
+    assert patch.filament_runout is None
+
+
+def test_telemetry_detects_explicit_filament_runout_flag():
+    patch = TelemetryPatch.from_raw("test-a1", {"print": {"filament_runout": True}})
+    assert patch.filament_runout is True
+    assert patch.filament_runout_details["source"] == "filament_runout"
+
+
+def test_telemetry_detects_hms_runout_codes():
+    hms_patch = TelemetryPatch.from_raw(
+        "test-a1",
+        {"print": {"hms": [{"code": "HMS_0700_2000_0002_0001"}]}},
+    )
+    assert hms_patch.filament_runout is True
+    assert hms_patch.filament_runout_details["source"] == "hms.code"
+
+def test_a1_mini_external_spool_runout_from_captured_live_shape():
+    patch = TelemetryPatch.from_raw(
+        "test-a1",
+        {
+            "print": {
+                "gcode_state": "PAUSE",
+                "print_error": 134184977,
+                "hms": [{"code": 131073, "attr": 318709760}],
+                "ams": {"ams_exist_bits": "0", "tray_now": "254"},
+                "vt_tray": {"id": "254", "remain": 0},
+            }
+        },
+    )
+    assert patch.filament_runout is True
+    assert patch.filament_runout_details["source"] == "hms.a1_mini_external_runout"
+
+
 @pytest.mark.asyncio
 async def test_patch_merge_preserves_untouched_fields(state_manager):
     printer_id = "test-a1"

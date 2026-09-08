@@ -49,6 +49,8 @@ class BambuMqttClient:
         self._connected = False
         self._stopped = False
         self._client: Optional[mqtt.Client] = None
+        self._awaiting_pause_detail = False
+        self._pending_pause_patch: Optional[TelemetryPatch] = None
 
     @property
     def is_connected(self) -> bool:
@@ -137,14 +139,47 @@ class BambuMqttClient:
             patch = TelemetryPatch.from_raw(self.printer_id, raw_payload)
             if patch.online is None:
                 patch.online = True
-            # Route patch thread-safely into Phase 1 state manager
-            if self.state_manager:
-                asyncio.run_coroutine_threadsafe(
-                    self.state_manager.apply_patch(patch),
-                    self.loop,
-                )
+            payload = raw_payload.get("print", raw_payload)
+            is_pause = (patch.gcode_state or "").upper() == "PAUSE"
+            is_full_status = isinstance(payload, dict) and any(
+                key in payload for key in ("hms", "gcode_file", "subtask_id", "task_id", "vt_tray")
+            )
+
+            # A1 Mini first sends a sparse PAUSE delta. Request a full report
+            # before emitting a generic pause so the authoritative HMS/external
+            # spool evidence can produce one accurate runout event.
+            if is_pause and patch.filament_runout is None and not is_full_status:
+                self._pending_pause_patch = patch
+                if not self._awaiting_pause_detail:
+                    self._awaiting_pause_detail = True
+                    self.send_pushall()
+                    self.loop.call_soon_threadsafe(
+                        lambda: self.loop.call_later(2.5, self._flush_pending_pause)
+                    )
+                return
+
+            if is_pause and self._awaiting_pause_detail:
+                self._awaiting_pause_detail = False
+                self._pending_pause_patch = None
+            elif not is_pause:
+                self._awaiting_pause_detail = False
+                self._pending_pause_patch = None
+
+            self._submit_patch(patch)
         except Exception as exc:
             logger.debug("Error parsing MQTT payload for %s: %s", self.printer_id, exc)
+
+    def _submit_patch(self, patch: TelemetryPatch) -> None:
+        if self.state_manager:
+            asyncio.run_coroutine_threadsafe(self.state_manager.apply_patch(patch), self.loop)
+
+    def _flush_pending_pause(self) -> None:
+        """Apply a generic pause only when a full-status report never arrived."""
+        if self._awaiting_pause_detail and self._pending_pause_patch:
+            patch = self._pending_pause_patch
+            self._awaiting_pause_detail = False
+            self._pending_pause_patch = None
+            self._submit_patch(patch)
 
     def send_command(self, payload: Dict[str, Any]) -> bool:
         """Publish a command to device/{serial}/request."""
