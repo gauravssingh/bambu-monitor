@@ -31,7 +31,10 @@ printers:
 
 events:
   delivery:
-    enabled: true
+    # Disabled by default: startup refuses to run with delivery enabled and
+    # no EVENT_SECRET set (events would be delivered unsigned). Set both
+    # `enabled: true` and EVENT_SECRET once Hermes is configured.
+    enabled: false
     endpoint: ${EVENT_ENDPOINT:http://localhost:8644/webhooks/bambu-printer}
     secret: ${EVENT_SECRET:}
     timeout_seconds: 10

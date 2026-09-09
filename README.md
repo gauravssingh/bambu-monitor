@@ -32,7 +32,7 @@ graph TD
     end
 
     H -->|HTTP POST + HMAC-SHA256\nPhase 4 Outbox Worker| I[Hermes Gateway :8644\n/webhooks/bambu-printer]
-    I -->|Push Notification| J[Telegram Bot\nChat: 1117425083]
+    I -->|Push Notification| J[Telegram Bot\nChat: your-chat-id]
     
     E -->|REST API :8000| K[External Consumers / Dashboards]
     E -->|SSE Stream :8000| L[Real-Time Live UI]
@@ -187,6 +187,7 @@ Bambu Monitor integrates with **Hermes** to push real-time notifications to your
 * **Print Pauses**: When print is paused manually or by safety sensors.
 
 ### 1. Bambu Monitor Configuration ([config.yaml](config.yaml))
+Delivery is **disabled by default** (`enabled: false`) — startup refuses to run with delivery enabled and no `EVENT_SECRET` configured, so events would never be sent unsigned. Set both of the following once Hermes is ready:
 ```yaml
 events:
   delivery:
@@ -223,15 +224,15 @@ events:
     "prompt": "Bambu 3D Printer Event: {event_type}\nPrinter: {source}\nSeverity: {severity}\n\nEvent details:\n{__raw__}\n\nFor alert-like events, download the fresh snapshot from {camera_snapshot_url} and send it to Telegram using MEDIA:/tmp/bambu_alert.jpg.\nFor timelapse.completed events, download the finished MP4 video from {timelapse_video_url} and deliver it to Telegram as MEDIA:/tmp/timelapse.mp4 announcing that the print timelapse video is ready!",
     "deliver": "telegram",
     "deliver_extra": {
-      "chat_id": "1117425083"
+      "chat_id": "${TELEGRAM_CHAT_ID}"
     }
   }
 }
 ```
 
-### 3. Guaranteed Delivery & Reverse Acknowledgement
-* **Transport Acknowledgement**: When Bambu Monitor delivers an event, Hermes returns `HTTP 200 OK`. Bambu Monitor marks the event `delivered` in SQLite WAL and **never sends it again**.
-* **Alert Spam Suppression**: While an alert condition persists, the state engine suppresses duplicate events. Only **one** notification fires on trigger, and **one** on resolution.
+### 3. Delivery Semantics & Reverse Acknowledgement
+* **At-Least-Once Delivery, Not Exactly-Once**: Bambu Monitor retries an event (per-printer FIFO, exponential backoff) until it receives `HTTP 200 OK` from Hermes, then marks it `delivered` in SQLite WAL and stops resending *from that instance*. If the network drops the response after Hermes already processed the event, Bambu Monitor sees no `200` and retries — Hermes then receives the same event a second time. **Consumers must treat `event_id` as an idempotency key** and deduplicate on it; do not assume exactly-once delivery.
+* **Alert Spam Suppression**: While an alert condition persists, the state engine suppresses duplicate events. Only **one** notification fires on trigger, and **one** on resolution — this is upstream suppression at the source, independent of (and not a substitute for) the consumer-side idempotency above.
 * **Operator Alert Acknowledgement**: Active alerts can be acknowledged via REST:
   ```bash
   curl -X POST http://localhost:8000/api/v1/printers/{printer_id}/alerts/{alert_id}/acknowledge

@@ -45,3 +45,16 @@ async def test_sse_event_stream(async_client: AsyncClient):
 async def test_stream_unknown_printer_returns_404(async_client):
     resp = await async_client.get("/api/v1/printers/does-not-exist/events/stream")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_subscribe_events_yields_heartbeat_during_idle_period(state_manager):
+    """An idle subscriber (no domain events) must still see periodic ticks
+    so an SSE client that disconnected without any traffic flowing is
+    detected instead of held open forever."""
+    printer_id = next(iter(state_manager._states))
+
+    gen = state_manager.subscribe_events(printer_id, heartbeat_seconds=0.05)
+    tick = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+    assert tick is None
+    await gen.aclose()

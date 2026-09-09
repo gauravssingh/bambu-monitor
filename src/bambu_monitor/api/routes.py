@@ -282,6 +282,13 @@ async def stream_events(
             async for event in state_manager.subscribe_events(printer_id):
                 if await request.is_disconnected():
                     break
+                if event is None:
+                    # Heartbeat tick during an idle period: an SSE comment
+                    # line, ignored by EventSource clients, keeps the
+                    # connection alive and lets us detect a disconnect that
+                    # happened while no real events were flowing.
+                    yield ": heartbeat\n\n"
+                    continue
                 yield f"event: domain_event\ndata: {event.model_dump_json()}\n\n"
                 count += 1
                 if limit is not None and count >= limit:

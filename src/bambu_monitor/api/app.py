@@ -196,10 +196,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if settings.events.delivery.enabled:
         from bambu_monitor.delivery import OutboxDeliveryWorker
         if not settings.events.delivery.secret:
-            logger.warning(
-                "Webhook delivery is enabled without a shared secret: events "
-                "will be sent unsigned (no X-Hub-Signature-256 header). Set "
-                "EVENT_SECRET to enable HMAC verification at the receiver."
+            raise RuntimeError(
+                "events.delivery.enabled is true but no EVENT_SECRET is configured. "
+                "Webhook events would be delivered unsigned (no X-Hub-Signature-256 "
+                "header), so startup is refused. Either set EVENT_SECRET to a long "
+                "random value, or set events.delivery.enabled: false (the default) "
+                "for local development without Hermes."
             )
         outbox_worker = OutboxDeliveryWorker(
             outbox_repo=outbox_repo,

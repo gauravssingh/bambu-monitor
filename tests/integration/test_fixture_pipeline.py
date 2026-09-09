@@ -44,7 +44,8 @@ async def test_full_fixture_pipeline_end_to_end(
     async def sse_listener():
         try:
             async for event in state_manager.subscribe_events(printer_id):
-                sse_events.append(event)
+                if event is not None:  # None is a periodic heartbeat tick, not a domain event
+                    sse_events.append(event)
                 if stop_listener.is_set():
                     break
         except asyncio.CancelledError:

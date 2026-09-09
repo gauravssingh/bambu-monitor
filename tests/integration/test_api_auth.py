@@ -40,6 +40,18 @@ async def test_loopback_client_with_foreign_host_header_is_rejected(test_setting
 
 
 @pytest.mark.asyncio
+async def test_startup_refuses_delivery_enabled_without_secret(test_settings, test_db, repositories):
+    """Delivery enabled with no EVENT_SECRET would deliver unsigned webhooks;
+    startup must refuse rather than silently degrade to unsigned delivery."""
+    test_settings.events.delivery.enabled = True
+    test_settings.events.delivery.secret = None
+    app = create_app(test_settings)
+    with pytest.raises(RuntimeError, match="EVENT_SECRET"):
+        async with app.router.lifespan_context(app):
+            pass
+
+
+@pytest.mark.asyncio
 async def test_api_token_authenticates_from_any_client(test_settings, test_db, repositories):
     test_settings.application.api_token = "super-secret-token"
     app = create_app(test_settings)

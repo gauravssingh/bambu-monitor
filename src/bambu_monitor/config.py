@@ -82,7 +82,10 @@ class PrinterConfig(BaseModel):
 
 
 class DeliveryConfig(BaseModel):
-    enabled: bool = True
+    # Safe by default: a config-less install (no EVENT_SECRET, no config.yaml)
+    # must boot cleanly. Enabling delivery requires an explicit opt-in plus a
+    # secret (see api/app.py's startup check).
+    enabled: bool = False
     endpoint: str = "http://localhost:8644/webhooks/bambu-printer"
     secret: Optional[str] = None
     timeout_seconds: int = 10

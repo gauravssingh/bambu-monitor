@@ -944,3 +944,39 @@ Fixes applied this pass. 149/149 tests pass; `ruff check src tests` clean.
 | 6 | Fire-and-forget `run_coroutine_threadsafe` — exceptions inside `apply_patch` were invisible (GC-only "Future exception was never retrieved") | `bambu/client.py`: new `_submit_coroutine` helper attaches `add_done_callback` to log any exception at ERROR; used at all three call sites | suite green |
 
 **Still open (unchanged; deliberately not attempted this pass — larger design changes, not gaps in a claimed fix):** bounded queue/coalescer for MQTT patch backpressure (§2.5, the other half of M3), plus everything already listed as open in batches 1 and 2.
+
+---
+
+# External review response + Fix log — batch 4 (2025-09-09)
+
+An external reviewer, working from GitHub's web view (by their own admission, hitting cache misses on some nested source pages), raised four points. Two were checked directly against the pushed commit and found stale; two were real gaps.
+
+| Claim | Verdict | Evidence |
+|---|---|---|
+| `config.yaml` on main still has `secret: ${EVENT_SECRET:bambu-secret-8f92a4e7c10b42d591}` | **Stale — not true of current `main`** | `git log -p --follow -- config.yaml` shows that exact line only in a commit prior to `93fbf80` (already pushed before this claim was raised); `git fetch && git rev-parse HEAD origin/main` confirmed both at the same SHA with no such line present. The string does still exist earlier in git history — Part 5 already calls this out ("rotate the webhook secret... if this repo was ever shared") — but it is not on `main`. Consistent with the reviewer's own caveat about a stale/cached GitHub view. |
+| README's Telegram `chat_id: "1117425083"` looks like a real destination | **Real gap, fixed** | Not a placeholder — a genuine numeric ID sitting in a public example. Replaced with `${TELEGRAM_CHAT_ID}` in the JSON subscription example and `your-chat-id` in the architecture diagram. |
+| README's delivery-guarantee wording implies exactly-once | **Real gap, fixed** | "Never sends it again" was happy-path-only phrasing. Section renamed to "Delivery Semantics & Reverse Acknowledgement"; now states this is at-least-once (a dropped ack after Hermes already processed the event causes a resend) and that consumers must dedupe on `event_id`. |
+| "I would not assume [outbox backoff, atomic claim, capture/render race, correlation drift, SSE bounds, PID lifecycle, background-failure visibility, CI] were fixed just because the repo progressed" | **Reasonable caution; here's the actual status per item** | See table below — this cross-checks against the batch-1/2/3 tables above using direct source reads, not GitHub's web view. |
+
+| Item | Status |
+|---|---|
+| Outbox retry backoff surviving restart | Fixed — batch 2, #2 (`worker.py`: eligibility computed from persisted `attempts`/`last_attempt_at`) |
+| Atomic PENDING → DELIVERING | Fixed — batch 2, #3 (`begin_delivery()` compare-and-set, `reclaim_stale_delivering()`) |
+| Capture/render race | Fixed — batch 2, #1 (`capture.py`: `stop()` waits on the worker lock, re-checks `_running` post-capture) |
+| Correlation frame-time drift | Fixed — batch 2, #8 (`correlation.py`: video time from ordered position, matching the renderer's re-index) |
+| SSE queue bounds | Fixed — batch 2, #12 (bounded `maxsize=256`, drop-oldest) |
+| SSE **heartbeat** | **Was NOT fixed — genuinely missed until now.** Batch 2's SSE fix covered bounded queues, 404 for unknown printers, and re-raising `CancelledError`, but `subscribe_events`'s `await queue.get()` still blocked with no timeout — an idle client (no events flowing) could hold its subscriber queue open indefinitely, exactly as §1.8 originally described. Fixed this pass: `subscribe_events(printer_id, heartbeat_seconds=15.0)` now yields `None` on a timeout tick; the SSE route sends an `: heartbeat` comment and re-checks `request.is_disconnected()` on each tick. New test: `test_subscribe_events_yields_heartbeat_during_idle_period`. |
+| PID lifecycle (EPERM misread, PID reuse, CWD-relative paths) | **Still open**, unchanged since the original review (§1.7) — never attempted in any batch. |
+| Background-failure visibility | Fixed — batch 3, #3/#4 |
+| CI | **Still open.** A `.github/workflows/ci.yml` (ruff + pytest, Python 3.12/3.13 matrix) was drafted and briefly committed, but pushing it requires the `workflow` OAuth scope, which the pushing account's token doesn't have. Left out of `main` rather than pushed with a workaround; add it once auth is sorted. |
+
+Additional fixes applied this pass, prompted by the review:
+
+| # | Finding | Fix | Tests |
+|---|---|---|---|
+| 1 | `events.delivery.enabled: true` shipped with no way to prevent an accidental unsigned-webhook deployment | `api/app.py`: startup now raises `RuntimeError` (was a `logger.warning`) when delivery is enabled with no `EVENT_SECRET`; `config.yaml`'s shipped default flipped to `enabled: false`; the `DeliveryConfig.enabled` **model** default also flipped to `False` (a config-less install falls back to bare `Settings()`, which must stay safe by default) | `test_startup_refuses_delivery_enabled_without_secret` |
+| 2 | SSE idle-disconnect detection (see table above) | `state/manager.py` + `api/routes.py`: heartbeat ticks as described above | `test_subscribe_events_yields_heartbeat_during_idle_period` |
+| 3 | Telegram `chat_id` and diagram chat label were real-looking values in a public README | `README.md`: parameterized to `${TELEGRAM_CHAT_ID}` / `your-chat-id` | — |
+| 4 | Delivery-guarantee wording implied exactly-once | `README.md`: reworded to state at-least-once + consumer-side `event_id` idempotency | — |
+
+151/151 tests pass; `ruff check src tests` clean.

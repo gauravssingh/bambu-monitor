@@ -115,8 +115,16 @@ class StateManager:
         alerts_map = self._active_alerts.get(printer_id, {})
         return list(alerts_map.values())
 
-    async def subscribe_events(self, printer_id: str) -> AsyncGenerator[DomainEvent, None]:
-        """Subscribe to live domain events via an asyncio.Queue for SSE."""
+    async def subscribe_events(
+        self, printer_id: str, heartbeat_seconds: float = 15.0
+    ) -> AsyncGenerator[Optional[DomainEvent], None]:
+        """Subscribe to live domain events via an asyncio.Queue for SSE.
+
+        Yields ``None`` every ``heartbeat_seconds`` of silence so the caller
+        can send a keep-alive and re-check for a client disconnect; otherwise
+        an idle connection with no events would only be noticed once traffic
+        eventually flows (or never, if it doesn't).
+        """
         if printer_id not in self._subscribers:
             self._subscribers[printer_id] = set()
 
@@ -124,7 +132,11 @@ class StateManager:
         self._subscribers[printer_id].add(queue)
         try:
             while True:
-                event = await queue.get()
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=heartbeat_seconds)
+                except asyncio.TimeoutError:
+                    yield None
+                    continue
                 yield event
         finally:
             self._subscribers[printer_id].discard(queue)
