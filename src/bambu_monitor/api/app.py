@@ -26,6 +26,7 @@ from bambu_monitor.storage.repositories import (
 from bambu_monitor.camera import CameraRegistry, create_camera_client
 from bambu_monitor.timelapse import TimelapseManager, TimelapseRenderer, TimelapseStorage
 from bambu_monitor.api.routes import router
+from bambu_monitor.api.dashboard import router as dashboard_router
 
 logger = logging.getLogger(__name__)
 
@@ -258,4 +259,5 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     )
     app.state.settings = active_settings
     app.include_router(router)
+    app.include_router(dashboard_router)
     return app

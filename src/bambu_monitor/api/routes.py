@@ -765,18 +765,69 @@ def _tl_gallery_card(session: Any, job: Optional[Any], hero_frame: Optional[Path
     )
 
 
-@router.get("/api/v1/printers/{printer_id}/timelapses/gallery", response_class=HTMLResponse)
-async def view_timelapse_gallery(
-    printer_id: str,
-    timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
-    timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
-    job_repo: JobRepository = Depends(get_job_repo),
-) -> HTMLResponse:
+def _gallery_device_selector(printer_id: str, printers: List[Any]) -> str:
+    """Device <select> for the generic gallery page; the active printer is preselected."""
+    esc = html.escape
+
+    def _opt(pid: str) -> str:
+        sel = ' selected' if pid == printer_id else ''
+        return f'<option value="{esc(pid, quote=True)}"{sel}>{esc(pid)}</option>'
+
+    options = []
+    seen = set()
+    for pid in (printer_id, *(p.id for p in printers)):
+        if pid and pid not in seen:
+            seen.add(pid)
+            options.append(_opt(pid))
+    onchange = "if(this.value){location.href='/gallery?printer='+encodeURIComponent(this.value);}"
+    return (
+        '<label class="tl-field">'
+        "<span>Device</span>"
+        f'<select id="gallery-device" aria-label="Select device" title="Switch device" onchange="{onchange}">'
+        + "".join(options)
+        + "</select></label>"
+    )
+
+
+def _gallery_head_right(printer_id: str, printers: List[Any]) -> str:
+    """Header actions for the generic gallery: device selector + dashboard link."""
+    return (
+        '<div class="tl-head-right">'
+        + _gallery_device_selector(printer_id, printers)
+        + '<a class="btn" href="/dashboard" title="Back to the Bambu Monitor dashboard">Dashboard</a>'
+        + "</div>"
+    )
+
+
+def _gallery_empty_page(printer_id: str, printers: List[Any]) -> HTMLResponse:
+    """A gallery page for the no-printers / unknown-printer case."""
+    esc = html.escape
+    page = _TL_GALLERY_PAGE.substitute(
+        doc_title="Timelapse Gallery | Bambu Monitor",
+        printer=esc(printer_id or "—"),
+        head_meta="",
+        status_options="",
+        cards_html="",
+        state_html=_tl_gallery_state_panel("empty", printer_id=printer_id),
+        body_class="tl-stateonly",
+        head_right=_gallery_head_right(printer_id, printers),
+    )
+    return HTMLResponse(content=page)
+
+
+async def _gallery_body(request: Request, printer_id: str) -> HTMLResponse:
     """Render the media-card timelapse gallery for a printer's recorded sessions."""
     esc = html.escape
-    retry_url = f"/api/v1/printers/{html.escape(printer_id, quote=True)}/timelapses/gallery"
+    printer_repo: PrinterRepository = request.app.state.printer_repo
+    printers = await printer_repo.list_all()
+    head_right = _gallery_head_right(printer_id, printers)
+    retry_url = f"/gallery?printer={html.escape(printer_id, quote=True)}"
+
+    if not printer_id:
+        return _gallery_empty_page(printer_id, printers)
 
     try:
+        timelapse_repo: TimelapseRepository = request.app.state.timelapse_repo
         sessions = await timelapse_repo.list_sessions_for_printer(printer_id, limit=50)
     except Exception:
         logger.exception("Gallery load failed for printer %s", printer_id)
@@ -788,8 +839,12 @@ async def view_timelapse_gallery(
             cards_html="",
             state_html=_tl_gallery_state_panel("error", retry_url=retry_url),
             body_class="tl-stateonly",
+            head_right=head_right,
         )
         return HTMLResponse(content=page, status_code=500)
+
+    timelapse_storage: TimelapseStorage = request.app.state.timelapse_storage
+    job_repo: JobRepository = request.app.state.job_repo
 
     # Enrich each session with its print job (file name, layer progress, ...) for display.
     jobs_by_id: Dict[str, Any] = {}
@@ -845,8 +900,27 @@ async def view_timelapse_gallery(
         cards_html=cards_html,
         state_html=state_html,
         body_class=body_class,
+        head_right=head_right,
     )
     return HTMLResponse(content=page)
+
+
+@router.get("/api/v1/printers/{printer_id}/timelapses/gallery", response_class=HTMLResponse, include_in_schema=False)
+async def view_timelapse_gallery(printer_id: str, request: Request) -> HTMLResponse:
+    """Legacy alias for the HTML gallery (canonical page lives at /gallery)."""
+    return await _gallery_body(request, printer_id)
+
+
+@router.get("/gallery", response_class=HTMLResponse)
+async def gallery_page(request: Request, printer: Optional[str] = Query(default=None)) -> HTMLResponse:
+    """Generic timelapse gallery (HTML). Defaults to the first registered printer."""
+    printer_repo: PrinterRepository = request.app.state.printer_repo
+    printers = await printer_repo.list_all()
+    ids = [p.id for p in printers]
+    target = printer if (printer and printer in ids) else (ids[0] if ids else "")
+    if not target:
+        return _gallery_empty_page("", printers)
+    return await _gallery_body(request, target)
 
 
 @router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}")
@@ -1091,6 +1165,14 @@ def _tl_icon(name: str, *, filled: bool = False) -> str:
         "video": '<rect x="2" y="7" width="13" height="10" rx="2"/><path d="m15 10 7-3v10l-7-3"/>',
         "eye": '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
         "hourglass": '<path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/>',
+        "grid": '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>',
+        "send": '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
+        "pulse": '<path d="M2 12h4l3-8 6 16 3-8h4"/>',
+        "database": '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
+        "bell": '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+        "zap": '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>',
+        "chevron_right": '<path d="m9 18 6-6-6-6"/>',
+        "expand": '<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>',
     }
     body = paths.get(name, paths["activity"])
     if filled:
@@ -1206,7 +1288,7 @@ async def view_timelapse_html(
     session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
 
     video_url = f"/api/v1/printers/{html.escape(printer_id)}/timelapses/{html.escape(timelapse_id)}/video"
-    gallery_url = f"/api/v1/printers/{html.escape(printer_id)}/timelapses/gallery"
+    gallery_url = f"/gallery?printer={html.escape(printer_id)}"
     # Offer the layer-change-only cut when a variant render exists on disk.
     layers_variant_url = ""
     if any((Path(session.storage_dir) / _VIDEO_VARIANTS["layers"].format(fps=fps)).is_file() for fps in (10, 30, 5, 2)):
@@ -1881,7 +1963,7 @@ _TL_VIEW_PAGE = Template("""<!DOCTYPE html>
         <!-- Video player + live telemetry summary -->
         <div class="card video-card">
           <div class="video-shell">
-            <video id="tl-video" controls autoplay loop playsinline>
+            <video id="tl-video" controls loop playsinline preload="metadata">
               <source src="$video_url" type="video/mp4">
               Your browser does not support HTML5 video playback.
             </video>
@@ -2383,6 +2465,11 @@ _TL_GALLERY_PAGE = Template("""<!DOCTYPE html>
     .tl-field select:focus { outline: none; border-color: var(--blue); }
     .tl-field select option { background: #0e1626; color: var(--text); }
 
+    .tl-head-right { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .tl-head-right .tl-field { flex: 0 1 auto; min-width: 230px; }
+    .tl-head-right .tl-field select { min-width: 230px; }
+    .tl-head-right .btn { height: 42px; white-space: nowrap; }
+
     /* --- Count row + view toggle --- */
     .tl-subrow { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
     .tl-count { font-size: 14.5px; font-weight: 600; color: #cbd5e1; font-variant-numeric: tabular-nums; }
@@ -2631,9 +2718,7 @@ _TL_GALLERY_PAGE = Template("""<!DOCTYPE html>
         <h1>Timelapse Gallery</h1>
         <p class="tl-head-sub"><span>Printer: <strong>$printer</strong></span>$head_meta</p>
       </div>
-      <a class="api-status" href="/api/v1/printers" title="API healthy &middot; View configured printers">
-        <span class="api-dot" aria-hidden="true"></span>API Status
-      </a>
+$head_right
     </header>
 
     <noscript><p style="color:#94a3b8; font-size:13px; margin-bottom:12px;">JavaScript is disabled &mdash; all timelapses are shown below (search, filters and list view are unavailable).</p></noscript>
