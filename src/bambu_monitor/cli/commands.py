@@ -40,7 +40,7 @@ from bambu_monitor.storage.repositories import (
     PrinterRepository,
     TimelapseRepository,
 )
-from bambu_monitor.timelapse import TelemetryCorrelator, TimelapseRenderer, TimelapseStorage
+from bambu_monitor.timelapse import TelemetryCorrelator, TimelapseManager, TimelapseStorage
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +72,8 @@ async def cmd_discover(timeout: float = 12.0) -> None:
         print(f"      Port:    {p.port}\n")
 
 
-async def test_printer_connection(ip: str, port: int, serial: str, access_code: str, timeout: float = 5.0) -> bool:
-    """Test raw TLS socket and MQTT handshake with the printer."""
+async def test_printer_connection(ip: str, port: int, timeout: float = 5.0) -> bool:
+    """Test raw TLS socket handshake reachability with the printer."""
     try:
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
@@ -149,12 +149,7 @@ async def cmd_onboard(
 
     # Step 3: Test connection
     print("\nTesting connection...")
-    reachable = await test_printer_connection(
-        ip=target_printer.ip,
-        port=target_printer.port,
-        serial=target_printer.serial,
-        access_code=code,
-    )
+    reachable = await test_printer_connection(ip=target_printer.ip, port=target_printer.port)
 
     if not reachable:
         print(f"✗ Warning: Could not verify TLS handshake with {target_printer.ip}:{target_printer.port}.")
@@ -432,14 +427,7 @@ async def cmd_reconnect(printer_id: str, settings: Optional[Settings] = None) ->
 
     if not daemon_notified:
         # Fallback to direct network verification probe
-        access_code = get_access_code(printer.serial_number) or ""
-        reachable = await test_printer_connection(
-            ip=printer.host,
-            port=BAMBU_MQTT_PORT,
-            serial=printer.serial_number,
-            access_code=access_code,
-            timeout=3.0,
-        )
+        reachable = await test_printer_connection(ip=printer.host, port=BAMBU_MQTT_PORT, timeout=3.0)
         if reachable:
             print("✓ TLS handshake established to printer")
             print("✓ Authentication parameters verified")
@@ -705,6 +693,31 @@ def cmd_service_logs(lines: int = 50) -> None:
         print(line)
 
 
+def _resolve_printer_camera(active_settings: Settings, printer_id: str) -> Optional[CameraConfig]:
+    """Look up and validate a printer's camera config, printing an error and
+    returning None for any of: unknown printer, no camera section, disabled
+    camera, or missing RTSP URL."""
+    p_cfg = next((p for p in active_settings.printers if p.id == printer_id), None)
+    if not p_cfg:
+        print(f"Error: Printer '{printer_id}' is not configured in config.yaml.")
+        return None
+
+    if not p_cfg.camera:
+        print(f"Error: No camera configured for printer '{printer_id}'.")
+        print("Tip: Add a 'camera' section to the printer in config.yaml.")
+        return None
+
+    if not p_cfg.camera.enabled:
+        print(f"Error: Camera for printer '{printer_id}' is disabled in configuration.")
+        return None
+
+    if not p_cfg.camera.rtsp_url:
+        print(f"Error: RTSP URL is empty for printer '{printer_id}'.")
+        return None
+
+    return p_cfg.camera
+
+
 async def cmd_camera_snap(
     printer_id: str,
     output: Optional[str] = None,
@@ -712,30 +725,16 @@ async def cmd_camera_snap(
 ) -> None:
     """Capture a single JPEG snapshot from the printer's RTSP camera."""
     active_settings = settings or load_config()
-    p_cfg = next((p for p in active_settings.printers if p.id == printer_id), None)
-    if not p_cfg:
-        print(f"Error: Printer '{printer_id}' is not configured in config.yaml.")
+    camera_cfg = _resolve_printer_camera(active_settings, printer_id)
+    if not camera_cfg:
         return
 
-    if not p_cfg.camera:
-        print(f"Error: No camera configured for printer '{printer_id}'.")
-        print("Tip: Add a 'camera' section to the printer in config.yaml.")
-        return
-
-    if not p_cfg.camera.enabled:
-        print(f"Error: Camera for printer '{printer_id}' is disabled in configuration.")
-        return
-
-    if not p_cfg.camera.rtsp_url:
-        print(f"Error: RTSP URL is empty for printer '{printer_id}'.")
-        return
-
-    client = CameraClient(config=p_cfg.camera, printer_id=printer_id)
+    client = CameraClient(config=camera_cfg, printer_id=printer_id)
     print(f"\nCapturing snapshot from camera for {printer_id} ({client.sanitized_url})...")
 
     t0 = time.perf_counter()
     try:
-        jpeg_bytes = await client.snapshot()
+        jpeg_bytes = await client.capture()
         elapsed_ms = (time.perf_counter() - t0) * 1000
     except CameraError as exc:
         print(f"\nError: Camera snapshot failed: {exc}\n")
@@ -756,31 +755,17 @@ async def cmd_camera_test(
 ) -> None:
     """Probe RTSP camera stream and print diagnostic metrics."""
     active_settings = settings or load_config()
-    p_cfg = next((p for p in active_settings.printers if p.id == printer_id), None)
-    if not p_cfg:
-        print(f"Error: Printer '{printer_id}' is not configured in config.yaml.")
+    camera_cfg = _resolve_printer_camera(active_settings, printer_id)
+    if not camera_cfg:
         return
 
-    if not p_cfg.camera:
-        print(f"Error: No camera configured for printer '{printer_id}'.")
-        print("Tip: Add a 'camera' section to the printer in config.yaml.")
-        return
-
-    if not p_cfg.camera.enabled:
-        print(f"Error: Camera for printer '{printer_id}' is disabled in configuration.")
-        return
-
-    if not p_cfg.camera.rtsp_url:
-        print(f"Error: RTSP URL is empty for printer '{printer_id}'.")
-        return
-
-    client = CameraClient(config=p_cfg.camera, printer_id=printer_id)
+    client = CameraClient(config=camera_cfg, printer_id=printer_id)
     print(f"\nTesting RTSP camera for {printer_id} ({client.sanitized_url})...")
-    print(f"  FFmpeg:               {p_cfg.camera.ffmpeg_bin}")
+    print(f"  FFmpeg:               {camera_cfg.ffmpeg_bin}")
     print("  Transport:            TCP")
-    print(f"  Probe Size:           {p_cfg.camera.probe_size_bytes} bytes")
-    print(f"  Analyze Duration:     {p_cfg.camera.analyze_duration_us} us")
-    print(f"  Timeout:              {p_cfg.camera.timeout_seconds}s\n")
+    print(f"  Probe Size:           {camera_cfg.probe_size_bytes} bytes")
+    print(f"  Analyze Duration:     {camera_cfg.analyze_duration_us} us")
+    print(f"  Timeout:              {camera_cfg.timeout_seconds}s\n")
 
     diag = await client.test_connection()
     if not diag.get("connected"):
@@ -827,21 +812,15 @@ async def cmd_timelapse_camera_test(
         if p_cfg:
             target_printer_id = p_cfg.id
 
+    # get_timelapse_config() already falls back to the printer's generic
+    # camera.rtsp_url when no dedicated timelapse camera URL is configured.
     tl_cfg = active_settings.get_timelapse_config(target_printer_id or "default")
-    cam_url = tl_cfg.camera.url or (p_cfg.camera.rtsp_url if (p_cfg and p_cfg.camera) else "")
-    if not cam_url:
+    if not tl_cfg.camera.rtsp_url:
         print("Error: No RTSP camera URL configured.")
         print("Tip: Set A1_MINI_CAMERA_RTSP or TIMELAPSE_CAMERA_RTSP in environment or configure camera in config.yaml.")
         return
 
-    cam_config = CameraConfig(
-        enabled=True,
-        type=tl_cfg.camera.type,
-        stream=tl_cfg.camera.stream,
-        rtsp_url=cam_url,
-        timeout_seconds=5.0,
-    )
-    client = create_camera_client(cam_config, printer_id=target_printer_id or "camera-test")
+    client = create_camera_client(tl_cfg.camera, printer_id=target_printer_id or "camera-test")
     cam_label = "Tapo RTSP" if "tapo" in tl_cfg.camera.type.lower() else tl_cfg.camera.type
 
     # 2. Check RTSP connectivity & metadata probe
@@ -1002,40 +981,23 @@ async def cmd_timelapse_generate(
     job_or_session_id: str,
     settings: Optional[Settings] = None,
 ) -> None:
-    """Manually compile / re-compile an MP4 video from stored frame images."""
+    """Manually compile / re-compile an MP4 video from stored frame images.
+
+    Delegates to TimelapseManager.generate_video() — the same operation the
+    live service uses to render on print completion — so a manual CLI
+    regenerate gets the same overlay-burn support and manifest persistence
+    instead of a second, drifted reimplementation.
+    """
     active_settings = settings or load_config()
     db, _, _, _, _ = get_db_and_repos(active_settings)
     await db.init_db()
     tl_repo = TimelapseRepository(db)
     storage = TimelapseStorage(base_dir=active_settings.timelapse.storage_dir)
+    manager = TimelapseManager(settings=active_settings, timelapse_repo=tl_repo, storage=storage)
 
-    session = await tl_repo.get_session(job_or_session_id)
-    if not session:
-        session = await tl_repo.get_session_by_job(job_or_session_id)
-
-    if not session:
-        print(f"Error: Timelapse session not found for ID '{job_or_session_id}'.")
-        return
-
-    frames = storage.list_frames(Path(session.storage_dir))
-    if not frames:
-        print(f"Error: No frames found for session '{session.id}' in {session.storage_dir}/frames.")
-        return
-
-    print(f"\nGenerating timelapse video for session {session.id} ({len(frames)} frames)...")
-    renderer = TimelapseRenderer()
-    cfg = active_settings.get_timelapse_config(session.printer_id)
-
+    print(f"\nGenerating timelapse video for '{job_or_session_id}'...")
     try:
-        video_path = await renderer.render(
-            session=session,
-            storage=storage,
-            fps=cfg.video.fps,
-            codec=cfg.video.codec,
-            quality=cfg.video.quality,
-            pixel_format=cfg.video.pixel_format,
-        )
-        await tl_repo.save_session(session)
+        video_path = await manager.generate_video(job_or_session_id)
         print(f"  ✓ Video compiled successfully ({video_path.stat().st_size / (1024 * 1024):.2f} MB)")
         print(f"  ✓ Saved to: {video_path.resolve()}\n")
     except Exception as exc:

@@ -3,18 +3,31 @@
 from __future__ import annotations
 
 from typing import Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from bambu_monitor.camera.security import sanitize_rtsp_url
 
 
 class CameraConfig(BaseModel):
-    """Configuration for an RTSP camera stream associated with a printer."""
+    """Configuration for an RTSP camera stream associated with a printer.
+
+    This is the single schema for "an RTSP camera attached to a printer" —
+    used both for the generic live-snapshot camera (``printers[].camera``)
+    and, via ``Settings.get_timelapse_config()``, for the timelapse
+    subsystem's camera. ``rtsp_url`` accepts the legacy ``url`` key too, so
+    existing ``timelapse.camera.url:`` config.yaml entries keep working.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
 
     enabled: bool = True
     type: str = Field(default="tapo_rtsp", description="Camera client type (e.g. tapo_rtsp, generic_rtsp)")
     stream: str = Field(default="stream1", description="Stream identifier or profile (e.g. stream1 HD, stream2 SD)")
-    rtsp_url: str = Field(default="", description="Primary RTSP stream URL (e.g. /stream1 HD)")
+    rtsp_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("rtsp_url", "url"),
+        description="Primary RTSP stream URL (e.g. /stream1 HD)",
+    )
     substream_url: Optional[str] = Field(
         default=None,
         description="Optional secondary RTSP stream URL (e.g. /stream2 SD)",

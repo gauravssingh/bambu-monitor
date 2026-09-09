@@ -31,7 +31,7 @@ from bambu_monitor.cli.commands import (
     cmd_timelapse_list,
     cmd_timelapse_status,
 )
-from bambu_monitor.config import load_config
+from bambu_monitor.config import Settings, load_config
 
 
 def setup_logging(log_level: str = "INFO") -> None:
@@ -185,8 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_daemon(config_path: Optional[str], host: str, port: int, log_level: Optional[str]) -> None:
-    settings = load_config(config_path)
+def run_daemon(settings: Settings, host: str, port: int, log_level: Optional[str]) -> None:
     active_level = log_level or settings.application.log_level
     setup_logging(active_level)
 
@@ -199,7 +198,7 @@ def run_daemon(config_path: Optional[str], host: str, port: int, log_level: Opti
 
     from bambu_monitor.api.app import create_app
     app = create_app(settings)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level=active_level.lower())
 
 
 def main() -> None:
@@ -214,7 +213,7 @@ def main() -> None:
     if cmd is None or cmd == "run":
         bind_host = getattr(args, "host", None) or "127.0.0.1"
         bind_port = getattr(args, "port", None) or 8000
-        run_daemon(args.config_path, bind_host, bind_port, args.log_level)
+        run_daemon(settings, bind_host, bind_port, args.log_level)
 
     elif cmd == "discover":
         asyncio.run(cmd_discover(timeout=args.timeout))

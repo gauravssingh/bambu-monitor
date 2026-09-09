@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 import pytest
 
+from bambu_monitor.camera import CameraConfig
 from bambu_monitor.camera.models import CameraHealth
 from bambu_monitor.cli.commands import (
     cmd_timelapse_camera_test,
@@ -18,7 +19,6 @@ from bambu_monitor.config import (
     DatabaseConfig,
     PrinterConfig,
     Settings,
-    TimelapseCameraConfig,
     TimelapseConfig,
 )
 from bambu_monitor.domain.printer import Printer
@@ -39,10 +39,10 @@ def cli_settings(tmp_path: Path) -> Settings:
         database=DatabaseConfig(path=db_path),
         timelapse=TimelapseConfig(
             storage_dir=storage_dir,
-            camera=TimelapseCameraConfig(
+            camera=CameraConfig(
                 type="tapo_rtsp",
                 stream="stream1",
-                url="rtsp://user:pass@192.168.1.50:554/stream1",
+                rtsp_url="rtsp://user:pass@192.168.1.50:554/stream1",
             ),
         ),
         printers=[
@@ -150,7 +150,7 @@ async def test_cmd_timelapse_camera_test_success(cli_settings: Settings, capsys)
 
 @pytest.mark.asyncio
 async def test_cmd_timelapse_camera_test_no_url(cli_settings: Settings, capsys):
-    cli_settings.timelapse.camera.url = ""
+    cli_settings.timelapse.camera.rtsp_url = ""
     await cmd_timelapse_camera_test(printer_id="printer-1", settings=cli_settings)
     captured = capsys.readouterr().out
     assert "Error: No RTSP camera URL configured" in captured
@@ -169,7 +169,7 @@ async def test_cmd_timelapse_generate(cli_settings: Settings, tmp_path: Path, ca
     # 1. Nonexistent session
     await cmd_timelapse_generate("nonexistent-id", settings=cli_settings)
     captured = capsys.readouterr().out
-    assert "Error: Timelapse session not found" in captured
+    assert "Timelapse session not found" in captured
 
     # 2. Session with no frames
     session_dir = tmp_path / "tl_gen_empty"
@@ -185,7 +185,7 @@ async def test_cmd_timelapse_generate(cli_settings: Settings, tmp_path: Path, ca
 
     await cmd_timelapse_generate("tl-gen-1", settings=cli_settings)
     captured = capsys.readouterr().out
-    assert "Error: No frames found for session" in captured
+    assert "Insufficient frames" in captured
 
     # 3. Session with frames -> mock renderer
     storage.save_frame(session_dir, 1, FAKE_JPEG)
@@ -199,8 +199,13 @@ async def test_cmd_timelapse_generate(cli_settings: Settings, tmp_path: Path, ca
         await cmd_timelapse_generate("tl-gen-1", settings=cli_settings)
 
     captured = capsys.readouterr().out
-    assert "Generating timelapse video for session tl-gen-1 (2 frames)" in captured
+    assert "Generating timelapse video for 'tl-gen-1'" in captured
     assert "Video compiled successfully" in captured
+    # Regression: the CLI previously reimplemented rendering directly and
+    # never passed burn_overlay, so `timelapse generate` silently ignored
+    # timelapse.overlay.enabled. Delegating to TimelapseManager.generate_video()
+    # must carry it through.
+    assert mock_render.call_args.kwargs["burn_overlay"] == cli_settings.timelapse.overlay.enabled
 
 
 @pytest.mark.asyncio

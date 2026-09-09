@@ -124,3 +124,83 @@ def test_per_printer_section_without_enabled_key_inherits_global_enabled():
     cfg = settings.get_timelapse_config("p3")
     assert cfg.enabled is False  # inherited from global, not the field default (True)
     assert cfg.video.fps == 60   # explicitly overridden
+
+
+def test_legacy_timelapse_camera_url_key_still_populates_rtsp_url(tmp_path: Path):
+    """CameraConfig replaced the old TimelapseCameraConfig for
+    `timelapse.camera`; existing config.yaml files using the legacy `url:`
+    key (this repo's own config.yaml included) must keep working unchanged."""
+    from bambu_monitor.config import load_config
+
+    config_file = tmp_path / "legacy_url_key.yaml"
+    config_file.write_text(
+        """
+timelapse:
+  camera:
+    type: tapo_rtsp
+    stream: stream1
+    url: rtsp://user:pass@192.168.1.55:554/stream1
+""",
+        encoding="utf-8",
+    )
+    settings = load_config(config_file)
+    assert settings.timelapse.camera.rtsp_url == "rtsp://user:pass@192.168.1.55:554/stream1"
+
+
+def test_timelapse_camera_fallback_inherits_full_printer_camera_config():
+    """When no dedicated timelapse camera URL is configured, timelapse must
+    inherit the printer's ENTIRE camera config (ffmpeg/timeout/probe
+    tuning included) rather than just the URL/type/stream fields — using
+    the same camera for live snapshots and timelapse should behave
+    identically in both places."""
+    from bambu_monitor.camera import CameraConfig
+    from bambu_monitor.config import PrinterConfig, Settings
+
+    settings = Settings(
+        printers=[
+            PrinterConfig(
+                id="p4",
+                serial_number="SNFALLBACK4",
+                host="10.0.0.4",
+                camera=CameraConfig(
+                    rtsp_url="rtsp://cam/stream1",
+                    timeout_seconds=9.5,
+                    ffmpeg_bin="/opt/custom/ffmpeg",
+                ),
+            )
+        ]
+    )
+    # No timelapse.camera.url configured at all (default empty).
+    cfg = settings.get_timelapse_config("p4")
+    assert cfg.camera.rtsp_url == "rtsp://cam/stream1"
+    assert cfg.camera.timeout_seconds == 9.5
+    assert cfg.camera.ffmpeg_bin == "/opt/custom/ffmpeg"
+
+
+def test_dedicated_timelapse_camera_url_is_not_overridden_by_printer_fallback():
+    """A dedicated timelapse.camera.rtsp_url must win outright — the printer
+    camera fallback only applies when no timelapse-specific URL is set."""
+    from bambu_monitor.camera import CameraConfig
+    from bambu_monitor.config import PrinterConfig, Settings, TimelapseConfig
+
+    settings = Settings(
+        printers=[
+            PrinterConfig(
+                id="p5",
+                serial_number="SNFALLBACK5",
+                host="10.0.0.5",
+                camera=CameraConfig(rtsp_url="rtsp://printer-cam/stream1"),
+            )
+        ],
+        timelapse=TimelapseConfig(camera=CameraConfig(rtsp_url="rtsp://dedicated-timelapse-cam/stream1")),
+    )
+    cfg = settings.get_timelapse_config("p5")
+    assert cfg.camera.rtsp_url == "rtsp://dedicated-timelapse-cam/stream1"
+
+
+def test_no_camera_configured_anywhere_leaves_rtsp_url_empty():
+    from bambu_monitor.config import PrinterConfig, Settings
+
+    settings = Settings(printers=[PrinterConfig(id="p6", serial_number="SNFALLBACK6", host="10.0.0.6")])
+    cfg = settings.get_timelapse_config("p6")
+    assert cfg.camera.rtsp_url == ""

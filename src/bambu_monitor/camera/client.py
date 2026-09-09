@@ -172,10 +172,6 @@ class CameraClient:
 
         return stdout
 
-    async def snapshot(self, timeout: Optional[float] = None) -> bytes:
-        """Alias for capture() for backward compatibility."""
-        return await self.capture(timeout=timeout)
-
     async def health(self) -> CameraHealth:
         """Probe the RTSP stream and measure latency, resolution, codec, and fps."""
         health = CameraHealth(
@@ -281,12 +277,7 @@ class CameraClient:
         pass
 
 
-class BaseRTSPCamera(CameraClient):
-    """Base RTSP camera client."""
-    pass
-
-
-class TapoRTSPCamera(BaseRTSPCamera):
+class TapoRTSPCamera(CameraClient):
     """TP-Link Tapo RTSP camera client.
 
     Supports standard Tapo stream identifiers:
@@ -302,14 +293,14 @@ class TapoRTSPCamera(BaseRTSPCamera):
         return self.config.rtsp_url
 
 
-class GenericRTSPCamera(BaseRTSPCamera):
-    """Generic vendor-agnostic RTSP camera client."""
-    camera_type: str = CameraType.GENERIC_RTSP.value
-
-
 def create_camera_client(config: CameraConfig, printer_id: str = "") -> CameraClient:
-    """Factory creating appropriate CameraClient implementation based on config type."""
+    """Factory creating appropriate CameraClient implementation based on config type.
+
+    Any non-Tapo type (including the generic/default) uses the base
+    CameraClient directly — it already implements vendor-agnostic RTSP
+    capture with no further specialization required.
+    """
     cam_type = (config.type or "").lower().strip()
     if cam_type in ("tapo_rtsp", "tapo"):
         return TapoRTSPCamera(config=config, printer_id=printer_id)
-    return GenericRTSPCamera(config=config, printer_id=printer_id)
+    return CameraClient(config=config, printer_id=printer_id)

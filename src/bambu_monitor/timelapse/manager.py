@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional, Set
 
 from bambu_monitor.camera import (
     CameraClient,
-    CameraConfig,
     CameraRegistry,
     create_camera_client,
 )
-from bambu_monitor.config import Settings
+from bambu_monitor.config import Settings, TimelapseConfig
 from bambu_monitor.domain.events import DomainEvent, EventSeverity
 from bambu_monitor.domain.print_job import JobStatus, PrintJob
 from bambu_monitor.storage.repositories import TimelapseRepository
@@ -58,11 +58,62 @@ class TimelapseManager:
         self._active_pauses: Dict[str, TimelapsePause] = {}
         self._render_tasks: Dict[str, asyncio.Task[Any]] = {}
         self._capture_tasks: Set["asyncio.Task[object]"] = set()
-        self._lock = asyncio.Lock()
+        # Per-printer lock: each of _active_sessions/_workers/_active_pauses is
+        # keyed by printer_id and only ever mutated for one printer at a time,
+        # so printer A's lifecycle handling must never wait on printer B's
+        # (mirrors StateManager._printer_lock). _render_tasks is keyed by
+        # session_id instead and _render_semaphore is an intentional global
+        # resource bound, so neither needs this lock.
+        self._printer_locks: Dict[str, asyncio.Lock] = {}
+        self._shutting_down = False
+
+    def _printer_lock(self, printer_id: str) -> asyncio.Lock:
+        """Return the lifecycle lock for one printer, creating it on demand."""
+        return self._printer_locks.setdefault(printer_id, asyncio.Lock())
 
     def get_active_session(self, printer_id: str) -> Optional[TimelapseSession]:
         """O(1) active in-memory session lookup."""
         return self._active_sessions.get(printer_id)
+
+    async def _persist(self, session: TimelapseSession) -> None:
+        """Persist a session's current state to SQLite and its on-disk manifest."""
+        await self.repo.save_session(session)
+        await self.storage.save_manifest_async(session)
+
+    async def _create_session(
+        self,
+        printer_id: str,
+        print_job_id: str,
+        cfg: TimelapseConfig,
+        started_at: datetime,
+        filename: str,
+    ) -> TimelapseSession:
+        """Build, resolve storage for, and durably persist a brand-new session.
+
+        Callers register it in ``_active_sessions`` and start its worker only
+        after this returns, so a persistence failure here never leaves an
+        active-but-unpersisted session in memory. Does not emit a domain
+        event or set any in-memory state — callers differ on whether a
+        creation event should fire (a live print start does; startup
+        reconciliation deliberately does not, to avoid re-announcing
+        "started" for a print that began before the process restarted).
+        """
+        session = TimelapseSession.create(
+            printer_id=printer_id,
+            print_job_id=print_job_id,
+            camera_type=cfg.camera.type,
+            capture_interval_seconds=cfg.capture.interval_seconds,
+            video_fps=cfg.video.fps,
+            storage_dir="",
+            started_at=started_at,
+            camera_id=printer_id,
+            metadata={"camera_stream": cfg.camera.stream, "filename": filename},
+        )
+        actual_dir = self.storage.resolve_session_dir(printer_id, session.id, started_at)
+        session.storage_dir = str(actual_dir)
+        self.storage.ensure_session_dirs(actual_dir)
+        await self._persist(session)
+        return session
 
     async def _emit_timelapse_event(
         self,
@@ -105,17 +156,10 @@ class TimelapseManager:
             return client
 
         cfg = self.settings.get_timelapse_config(printer_id)
-        if not cfg.enabled or not cfg.camera.url:
+        if not cfg.enabled or not cfg.camera.rtsp_url:
             return None
 
-        cam_config = CameraConfig(
-            enabled=True,
-            type=cfg.camera.type,
-            stream=cfg.camera.stream,
-            rtsp_url=cfg.camera.url,
-            timeout_seconds=5.0,
-        )
-        client = create_camera_client(config=cam_config, printer_id=printer_id)
+        client = create_camera_client(config=cfg.camera, printer_id=printer_id)
         self.camera_registry.register(printer_id, client)
         return client
 
@@ -156,6 +200,8 @@ class TimelapseManager:
         The worker's internal lock and debounce keep captures serialized and
         deduplicated.
         """
+        if self._shutting_down:
+            return
         worker = self._workers.get(printer_id)
         if not worker or not worker.is_running or worker.is_paused:
             return
@@ -191,7 +237,9 @@ class TimelapseManager:
         payload: Optional[Dict[str, Any]] = None,
     ) -> Optional[TimelapseSession]:
         """Initialize session, create directories, and spawn FrameCaptureWorker."""
-        async with self._lock:
+        if self._shutting_down:
+            return None
+        async with self._printer_lock(printer_id):
             cfg = self.settings.get_timelapse_config(printer_id)
             if not cfg.enabled:
                 logger.debug("Timelapse disabled for printer '%s'", printer_id)
@@ -215,30 +263,13 @@ class TimelapseManager:
                 await self._start_worker_for_session(printer_id, db_session, camera)
                 return db_session
 
-            started_at = utc_now()
-            session = TimelapseSession.create(
+            session = await self._create_session(
                 printer_id=printer_id,
                 print_job_id=job_id,
-                camera_type=cfg.camera.type,
-                capture_interval_seconds=cfg.capture.interval_seconds,
-                video_fps=cfg.video.fps,
-                storage_dir=str(self.storage.resolve_session_dir(printer_id, f"tmp_{job_id}", started_at)),
-                started_at=started_at,
-                camera_id=printer_id,
-                metadata={
-                    "camera_stream": cfg.camera.stream,
-                    "filename": (payload or {}).get("filename", ""),
-                },
+                cfg=cfg,
+                started_at=utc_now(),
+                filename=(payload or {}).get("filename", ""),
             )
-
-            # Resolve actual session directory with true session id
-            actual_dir = self.storage.resolve_session_dir(printer_id, session.id, started_at)
-            session.storage_dir = str(actual_dir)
-            self.storage.ensure_session_dirs(actual_dir)
-
-            # Persist
-            await self.repo.save_session(session)
-            await self.storage.save_manifest_async(session)
 
             self._active_sessions[printer_id] = session
             await self._start_worker_for_session(printer_id, session, camera)
@@ -261,17 +292,14 @@ class TimelapseManager:
         async def on_frame(seq: int, path: Path) -> None:
             # Throttled DB / manifest update every 10 frames
             if seq % 10 == 0:
-                await self.repo.save_session(session)
-                await self.storage.save_manifest_async(session)
+                await self._persist(session)
 
         async def on_degraded(err: str) -> None:
-            await self.repo.save_session(session)
-            await self.storage.save_manifest_async(session)
+            await self._persist(session)
             await self._emit_timelapse_event(printer_id, "timelapse.degraded", EventSeverity.WARNING, session)
 
         async def on_recovered() -> None:
-            await self.repo.save_session(session)
-            await self.storage.save_manifest_async(session)
+            await self._persist(session)
             await self._emit_timelapse_event(printer_id, "timelapse.resumed", EventSeverity.INFO, session)
 
         def get_telemetry_snapshot() -> Optional[Dict[str, Any]]:
@@ -318,7 +346,9 @@ class TimelapseManager:
 
     async def on_print_paused(self, printer_id: str, payload: Optional[Dict[str, Any]] = None) -> None:
         """Pause frame capture and record pause duration."""
-        async with self._lock:
+        if self._shutting_down:
+            return
+        async with self._printer_lock(printer_id):
             session = self._active_sessions.get(printer_id)
             if not session:
                 return
@@ -332,15 +362,16 @@ class TimelapseManager:
             self._active_pauses[printer_id] = pause
 
             session.transition_to(TimelapseStatus.PAUSED)
-            await self.repo.save_session(session)
-            await self.storage.save_manifest_async(session)
+            await self._persist(session)
 
             await self._emit_timelapse_event(printer_id, "timelapse.paused", EventSeverity.WARNING, session)
             logger.info("Timelapse session %s paused", session.id)
 
     async def on_print_resumed(self, printer_id: str, payload: Optional[Dict[str, Any]] = None) -> None:
         """Resume frame capture and close pause record."""
-        async with self._lock:
+        if self._shutting_down:
+            return
+        async with self._printer_lock(printer_id):
             session = self._active_sessions.get(printer_id)
             if not session:
                 return
@@ -352,8 +383,7 @@ class TimelapseManager:
                 await self.repo.update_pause(pause)
 
             session.transition_to(TimelapseStatus.CAPTURING)
-            await self.repo.save_session(session)
-            await self.storage.save_manifest_async(session)
+            await self._persist(session)
 
             worker = self._workers.get(printer_id)
             if worker:
@@ -363,8 +393,17 @@ class TimelapseManager:
             logger.info("Timelapse session %s resumed", session.id)
 
     async def on_print_completed(self, printer_id: str, payload: Optional[Dict[str, Any]] = None) -> None:
-        """Stop capture worker and queue asynchronous MP4 video generation."""
-        async with self._lock:
+        """Stop capture worker and queue asynchronous MP4 video generation.
+
+        Deliberately not guarded by _shutting_down: unlike the "start new
+        work" handlers, this winds existing work down (stops the worker,
+        schedules a bounded render task that shutdown()'s own render-task
+        wait will still pick up if it lands before that wait begins).
+        Rejecting it would leave the session stuck CAPTURING in the DB,
+        to be re-finalized as FAILED by orphan-recovery on the next restart
+        instead of correctly recorded as COMPLETED now.
+        """
+        async with self._printer_lock(printer_id):
             session = self._active_sessions.pop(printer_id, None)
             worker = self._workers.pop(printer_id, None)
             self._active_pauses.pop(printer_id, None)
@@ -381,7 +420,7 @@ class TimelapseManager:
 
     async def on_print_failed(self, printer_id: str, payload: Optional[Dict[str, Any]] = None) -> None:
         """Stop capture worker and compile video if sufficient frames exist."""
-        async with self._lock:
+        async with self._printer_lock(printer_id):
             session = self._active_sessions.pop(printer_id, None)
             worker = self._workers.pop(printer_id, None)
             self._active_pauses.pop(printer_id, None)
@@ -411,8 +450,7 @@ class TimelapseManager:
             if not frames:
                 err_msg = "No frames captured during print"
                 session.transition_to(TimelapseStatus.FAILED, error=err_msg)
-                await self.repo.save_session(session)
-                await self.storage.save_manifest_async(session)
+                await self._persist(session)
                 await self._emit_timelapse_event(printer_id, "timelapse.failed", EventSeverity.WARNING, session)
                 return
 
@@ -432,14 +470,12 @@ class TimelapseManager:
             if is_failed:
                 # Video rendered for failed print; mark session as FAILED per lifecycle
                 session.transition_to(TimelapseStatus.FAILED, error="Print job failed")
-                await self.repo.save_session(session)
-                await self.storage.save_manifest_async(session)
+                await self._persist(session)
                 await self._emit_timelapse_event(printer_id, "timelapse.failed", EventSeverity.WARNING, session)
             else:
                 # Successful print: check retention policy
                 session.transition_to(TimelapseStatus.COMPLETED)
-                await self.repo.save_session(session)
-                await self.storage.save_manifest_async(session)
+                await self._persist(session)
 
                 if cfg.retention.successful_frames == "delete_after_video":
                     deleted = self.storage.cleanup_successful_frames(session_dir)
@@ -450,21 +486,21 @@ class TimelapseManager:
         except TimelapseRenderError as err:
             logger.error("Timelapse render error for %s: %s", session.id, err)
             session.transition_to(TimelapseStatus.FAILED, error=str(err))
-            await self.repo.save_session(session)
-            await self.storage.save_manifest_async(session)
+            await self._persist(session)
             await self._emit_timelapse_event(printer_id, "timelapse.failed", EventSeverity.WARNING, session)
         except Exception as exc:
             logger.exception("Unexpected error finalizing timelapse %s: %s", session.id, exc)
             session.transition_to(TimelapseStatus.FAILED, error=str(exc))
-            await self.repo.save_session(session)
-            await self.storage.save_manifest_async(session)
+            await self._persist(session)
             await self._emit_timelapse_event(printer_id, "timelapse.failed", EventSeverity.CRITICAL, session)
         finally:
             self._render_tasks.pop(session.id, None)
 
     async def reconcile_on_startup(self, printer_id: str, active_job: Optional[PrintJob]) -> None:
         """Handle process restarts safely, reattaching to existing sessions or finalizing orphans."""
-        async with self._lock:
+        if self._shutting_down:
+            return
+        async with self._printer_lock(printer_id):
             active_session = await self.repo.get_active_session_for_printer(printer_id)
 
             if active_job:
@@ -514,8 +550,7 @@ class TimelapseManager:
                             session.transition_to(TimelapseStatus.PAUSED)
                         else:
                             session.transition_to(TimelapseStatus.CAPTURING)
-                        await self.repo.save_session(session)
-                        await self.storage.save_manifest_async(session)
+                        await self._persist(session)
 
                 elif not session:
                     # Active job exists but no timelapse session exists yet
@@ -523,28 +558,20 @@ class TimelapseManager:
                         "Startup reconciliation: active print %s found without session; starting timelapse",
                         active_job.id,
                     )
-                    # Use on_print_started logic
                     cfg = self.settings.get_timelapse_config(printer_id)
                     if cfg.enabled:
                         camera = self._resolve_camera_client(printer_id)
                         if camera:
-                            started_at = active_job.started_at
-                            new_session = TimelapseSession.create(
+                            # Timestamped at the print's actual start (not "now"), and
+                            # deliberately does not emit timelapse.started — this is a
+                            # reattachment to an already-running print, not a new one.
+                            new_session = await self._create_session(
                                 printer_id=printer_id,
                                 print_job_id=active_job.id,
-                                camera_type=cfg.camera.type,
-                                capture_interval_seconds=cfg.capture.interval_seconds,
-                                video_fps=cfg.video.fps,
-                                storage_dir="",
-                                started_at=started_at,
-                                camera_id=printer_id,
-                                metadata={"camera_stream": cfg.camera.stream, "filename": active_job.filename},
+                                cfg=cfg,
+                                started_at=active_job.started_at,
+                                filename=active_job.filename,
                             )
-                            actual_dir = self.storage.resolve_session_dir(printer_id, new_session.id, started_at)
-                            new_session.storage_dir = str(actual_dir)
-                            self.storage.ensure_session_dirs(actual_dir)
-                            await self.repo.save_session(new_session)
-                            await self.storage.save_manifest_async(new_session)
 
                             self._active_sessions[printer_id] = new_session
                             await self._start_worker_for_session(printer_id, new_session, camera)
@@ -553,8 +580,7 @@ class TimelapseManager:
                                 if worker:
                                     worker.pause()
                                 new_session.transition_to(TimelapseStatus.PAUSED)
-                                await self.repo.save_session(new_session)
-                                await self.storage.save_manifest_async(new_session)
+                                await self._persist(new_session)
 
             else:
                 # No active print job on startup. If an active session remains in DB, finalize it!
@@ -598,19 +624,29 @@ class TimelapseManager:
                 burn_overlay=burn_overlay,
             )
         session.transition_to(TimelapseStatus.COMPLETED)
-        await self.repo.save_session(session)
-        await self.storage.save_manifest_async(session)
+        await self._persist(session)
         return video_path
 
     async def shutdown(self) -> None:
-        """Gracefully stop all workers and wait for render tasks during service shutdown."""
-        async with self._lock:
-            for worker in self._workers.values():
-                try:
-                    await worker.stop()
-                except Exception:
-                    pass
-            self._workers.clear()
+        """Gracefully stop all workers and wait for render tasks during service shutdown.
+
+        Sets the shutdown flag first so every lifecycle handler's guard check
+        rejects new sessions from here on (a lingering MQTT event can still
+        reach these handlers until the caller also stops the MQTT clients).
+        Handlers already past that guard and in flight for a given printer
+        are then waited out by acquiring that printer's own lock before
+        touching its worker, so no worker is stopped out from under a
+        still-running handler.
+        """
+        self._shutting_down = True
+        for printer_id in list(self._workers.keys()):
+            async with self._printer_lock(printer_id):
+                worker = self._workers.pop(printer_id, None)
+                if worker:
+                    try:
+                        await worker.stop()
+                    except Exception:
+                        pass
 
         # Wait briefly for active render tasks
         tasks = list(self._render_tasks.values())

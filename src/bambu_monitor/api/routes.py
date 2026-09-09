@@ -155,7 +155,7 @@ async def get_health(
 
 # --- Printers ---
 
-@router.get("/printers", response_model=List[Printer])
+@router.get("/printers", response_model=List[Printer], include_in_schema=False)  # legacy alias, see /api/v1/printers
 @router.get("/api/v1/printers", response_model=List[Printer])
 async def list_printers(
     printer_repo: PrinterRepository = Depends(get_printer_repo),
@@ -390,7 +390,7 @@ async def get_camera_snapshot(printer_id: str, request: Request) -> Response:
         )
 
     try:
-        jpeg_bytes = await camera.snapshot()
+        jpeg_bytes = await camera.capture()
         return Response(content=jpeg_bytes, media_type="image/jpeg")
     except CameraTimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc))
@@ -400,6 +400,44 @@ async def get_camera_snapshot(printer_id: str, request: Request) -> Response:
         raise HTTPException(status_code=400, detail=str(exc))
     except CameraError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+async def _get_timelapse_session(
+    timelapse_repo: TimelapseRepository,
+    timelapse_id: str,
+    printer_id: Optional[str] = None,
+) -> Any:
+    """Fetch a timelapse session by ID, 404ing if missing or owned by a different printer."""
+    session = await timelapse_repo.get_session(timelapse_id)
+    if not session or (printer_id is not None and session.printer_id != printer_id):
+        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+    return session
+
+
+def _timelapse_status_color(status_value: str) -> str:
+    """Badge color for a timelapse session's status, shared by the gallery and player views."""
+    if status_value == "completed":
+        return "#10b981"
+    if status_value in ("capturing", "paused"):
+        return "#f59e0b"
+    return "#ef4444"
+
+
+def _timelapse_video_response(session: Any, timelapse_storage: TimelapseStorage, inline: bool) -> FileResponse:
+    """Resolve and serve a session's rendered MP4, either inline or as a download."""
+    video_path = timelapse_storage.get_video_path(session.storage_dir)
+    if not video_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Video file for timelapse '{session.id}' has not been generated or was removed",
+        )
+    if inline:
+        return FileResponse(path=str(video_path), media_type="video/mp4", headers={"Content-Disposition": "inline"})
+    return FileResponse(
+        path=str(video_path),
+        media_type="video/mp4",
+        filename=f"timelapse_{session.printer_id}_{session.print_job_id}.mp4",
+    )
 
 
 # --- Timelapse Endpoints ---
@@ -457,7 +495,7 @@ async def view_timelapse_gallery(
     for s in sessions:
         view_url = f"/api/v1/printers/{esc(printer_id)}/timelapses/{esc(s.id)}/view"
         download_url = f"/api/v1/printers/{esc(printer_id)}/timelapses/{esc(s.id)}/video"
-        status_color = "#10b981" if s.status.value == "completed" else ("#f59e0b" if s.status.value in ("capturing", "paused") else "#ef4444")
+        status_color = _timelapse_status_color(s.status.value)
         cards_html += f"""
         <div class="card">
           <div class="card-header">
@@ -532,9 +570,7 @@ async def get_timelapse(
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> Dict[str, Any]:
     """Retrieve details, status, and manifest for a specific timelapse session."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session or session.printer_id != printer_id:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
 
     pauses = await timelapse_repo.get_pauses_for_session(timelapse_id)
     manifest = timelapse_storage.load_manifest(session.storage_dir)
@@ -553,22 +589,8 @@ async def get_timelapse_video(
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> FileResponse:
     """Download or stream the generated MP4 timelapse video."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session or session.printer_id != printer_id:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
-
-    video_path = timelapse_storage.get_video_path(session.storage_dir)
-    if not video_path.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Video file for timelapse '{timelapse_id}' has not been generated or was removed",
-        )
-
-    return FileResponse(
-        path=str(video_path),
-        media_type="video/mp4",
-        filename=f"timelapse_{printer_id}_{session.print_job_id}.mp4",
-    )
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
+    return _timelapse_video_response(session, timelapse_storage, inline=False)
 
 
 @router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/stream")
@@ -579,22 +601,8 @@ async def stream_printer_timelapse_video(
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> FileResponse:
     """Stream the generated MP4 timelapse video directly for HTML5 in-browser playback."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session or session.printer_id != printer_id:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
-
-    video_path = timelapse_storage.get_video_path(session.storage_dir)
-    if not video_path.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Video file for timelapse '{timelapse_id}' has not been generated or was removed",
-        )
-
-    return FileResponse(
-        path=str(video_path),
-        media_type="video/mp4",
-        headers={"Content-Disposition": "inline"},
-    )
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
+    return _timelapse_video_response(session, timelapse_storage, inline=True)
 
 
 # --- Global Timelapse Endpoints ---
@@ -620,9 +628,7 @@ async def get_timelapse_by_id(
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> Dict[str, Any]:
     """Retrieve details and manifest for a specific timelapse session across all printers."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id)
 
     pauses = await timelapse_repo.get_pauses_for_session(timelapse_id)
     manifest = timelapse_storage.load_manifest(session.storage_dir)
@@ -641,22 +647,8 @@ async def get_timelapse_video_by_id(
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> FileResponse:
     """Download the generated MP4 timelapse video by session ID."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
-
-    video_path = timelapse_storage.get_video_path(session.storage_dir)
-    if not video_path.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Video file for timelapse '{timelapse_id}' has not been generated or was removed",
-        )
-
-    return FileResponse(
-        path=str(video_path),
-        media_type="video/mp4",
-        filename=f"timelapse_{session.printer_id}_{session.print_job_id}.mp4",
-    )
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id)
+    return _timelapse_video_response(session, timelapse_storage, inline=False)
 
 
 @router.get("/api/v1/timelapses/{timelapse_id}/stream")
@@ -666,22 +658,8 @@ async def stream_timelapse_video_by_id(
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> FileResponse:
     """Stream the generated MP4 timelapse video by session ID for in-browser playback."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
-
-    video_path = timelapse_storage.get_video_path(session.storage_dir)
-    if not video_path.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Video file for timelapse '{timelapse_id}' has not been generated or was removed",
-        )
-
-    return FileResponse(
-        path=str(video_path),
-        media_type="video/mp4",
-        headers={"Content-Disposition": "inline"},
-    )
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id)
+    return _timelapse_video_response(session, timelapse_storage, inline=True)
 
 
 @router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/frames")
@@ -693,9 +671,7 @@ async def list_timelapse_frames(
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> Dict[str, Any]:
     """List available frames for a session and their direct retrieval URLs."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session or session.printer_id != printer_id:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
 
     session_dir = Path(session.storage_dir)
     frames = timelapse_storage.list_frames(session_dir)
@@ -730,9 +706,7 @@ async def get_timelapse_frame(
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> FileResponse:
     """Retrieve an individual JPEG frame from a timelapse session."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session or session.printer_id != printer_id:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
 
     session_dir = Path(session.storage_dir)
     frame_path = timelapse_storage.get_frame_path(session_dir, sequence)
@@ -754,9 +728,7 @@ async def get_timelapse_metadata(
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> List[Dict[str, Any]]:
     """Retrieve frame-by-frame visual history metadata (frames.jsonl) for a session."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session or session.printer_id != printer_id:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
 
     return timelapse_storage.read_frames_metadata(session.storage_dir, limit=limit)
 
@@ -772,9 +744,7 @@ async def get_timelapse_correlation(
     event_repo: EventRepository = Depends(get_event_repo),
 ) -> Dict[str, Any]:
     """Correlate visual frames with hotend/bed temperature, speed, layers, and anomalies."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session or session.printer_id != printer_id:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
 
     frames_metadata = timelapse_storage.read_frames_metadata(session.storage_dir)
     events = await event_repo.list_for_printer(printer_id, limit=250, since=session.started_at)
@@ -803,16 +773,14 @@ async def view_timelapse_html(
     event_repo: EventRepository = Depends(get_event_repo),
 ) -> HTMLResponse:
     """Render a dedicated, responsive HTML5 player with synchronized telemetry HUD and SVG timeline."""
-    session = await timelapse_repo.get_session(timelapse_id)
-    if not session or session.printer_id != printer_id:
-        raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
+    session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
 
     video_url = f"/api/v1/printers/{html.escape(printer_id)}/timelapses/{html.escape(timelapse_id)}/video"
     gallery_url = f"/api/v1/printers/{html.escape(printer_id)}/timelapses/gallery"
     corr_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/correlation"
     meta_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/metadata"
 
-    status_color = "#10b981" if session.status.value == "completed" else ("#f59e0b" if session.status.value in ("capturing", "paused") else "#ef4444")
+    status_color = _timelapse_status_color(session.status.value)
 
     # Run correlation
     frames_metadata = timelapse_storage.read_frames_metadata(session.storage_dir)

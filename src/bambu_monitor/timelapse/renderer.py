@@ -150,7 +150,7 @@ class TimelapseRenderer:
         tmp_video_path = session_dir / f".timelapse_{os.getpid()}_{uuid.uuid4().hex[:8]}.tmp.mp4"
 
         session.transition_to(TimelapseStatus.FINALIZING)
-        await asyncio.to_thread(storage.save_manifest, session, session_dir)
+        await storage.save_manifest_async(session, session_dir)
 
         # 1. Validate frame availability
         frames = await asyncio.to_thread(storage.list_frames, session_dir)
@@ -161,7 +161,7 @@ class TimelapseRenderer:
             )
             logger.warning(err_msg)
             session.transition_to(TimelapseStatus.FAILED, error=err_msg)
-            await asyncio.to_thread(storage.save_manifest, session, session_dir)
+            await storage.save_manifest_async(session, session_dir)
             raise TimelapseRenderError(err_msg)
 
         # 2. Ensure frame sequence is valid (handle missed frame gaps and optional HUD overlay)
@@ -257,7 +257,7 @@ class TimelapseRenderer:
             # 6. Update session status
             session.video_path = str(final_video_path.resolve())
             session.transition_to(TimelapseStatus.COMPLETED)
-            await asyncio.to_thread(storage.save_manifest, session, session_dir)
+            await storage.save_manifest_async(session, session_dir)
             return final_video_path
 
         except asyncio.CancelledError:
@@ -282,7 +282,7 @@ class TimelapseRenderer:
             err_msg = str(exc)
             logger.error("Timelapse video generation failed for session %s: %s", session.id, err_msg)
             session.transition_to(TimelapseStatus.FAILED, error=err_msg)
-            await asyncio.to_thread(storage.save_manifest, session, session_dir)
+            await storage.save_manifest_async(session, session_dir)
             raise TimelapseRenderError(err_msg) from exc
 
         finally:

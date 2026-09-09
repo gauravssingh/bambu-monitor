@@ -87,7 +87,7 @@ def test_camera_config():
     assert cfg.analyze_duration_us == 2000000
 
 
-# 3. CameraClient.snapshot() Success
+# 3. CameraClient.capture() Success
 @pytest.mark.asyncio
 async def test_snapshot_success():
     cfg = CameraConfig(
@@ -102,7 +102,7 @@ async def test_snapshot_success():
     mock_proc.communicate.return_value = (FAKE_JPEG, b"")
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        result = await client.snapshot()
+        result = await client.capture()
         assert result == FAKE_JPEG
         assert mock_exec.called
         args = mock_exec.call_args[0]
@@ -113,7 +113,7 @@ async def test_snapshot_success():
         assert "image2pipe" in args
 
 
-# 4. CameraClient.snapshot() FFmpeg Failure & Sanitization
+# 4. CameraClient.capture() FFmpeg Failure & Sanitization
 @pytest.mark.asyncio
 async def test_snapshot_ffmpeg_failure():
     cfg = CameraConfig(
@@ -131,14 +131,14 @@ async def test_snapshot_ffmpeg_failure():
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CameraConnectionError) as exc_info:
-            await client.snapshot()
+            await client.capture()
 
         err_msg = str(exc_info.value)
         assert "secret" not in err_msg
         assert "admin:***@" in err_msg
 
 
-# 5. CameraClient.snapshot() Timeout with Guaranteed Process Kill
+# 5. CameraClient.capture() Timeout with Guaranteed Process Kill
 @pytest.mark.asyncio
 async def test_snapshot_timeout_kills_process():
     cfg = CameraConfig(
@@ -155,7 +155,7 @@ async def test_snapshot_timeout_kills_process():
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CameraTimeoutError) as exc_info:
-            await client.snapshot()
+            await client.capture()
 
         assert "timed out after 1.0s" in str(exc_info.value)
         # Verify guaranteed process cleanup
@@ -163,7 +163,7 @@ async def test_snapshot_timeout_kills_process():
         mock_proc.wait.assert_called_once()
 
 
-# 6. CameraClient.snapshot() Empty Output & Invalid Output
+# 6. CameraClient.capture() Empty Output & Invalid Output
 @pytest.mark.asyncio
 async def test_snapshot_empty_stdout():
     cfg = CameraConfig(
@@ -178,7 +178,7 @@ async def test_snapshot_empty_stdout():
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CameraCaptureError) as exc_info:
-            await client.snapshot()
+            await client.capture()
         assert "empty image" in str(exc_info.value)
 
 
@@ -196,7 +196,7 @@ async def test_snapshot_invalid_magic_bytes():
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(CameraCaptureError) as exc_info:
-            await client.snapshot()
+            await client.capture()
         assert "not a valid JPEG" in str(exc_info.value)
 
 
@@ -209,7 +209,7 @@ async def test_snapshot_disabled_camera():
     )
     client = CameraClient(config=cfg, printer_id="test-a1")
     with pytest.raises(CameraConfigError) as exc_info:
-        await client.snapshot()
+        await client.capture()
     assert "Camera is disabled" in str(exc_info.value)
 
 
@@ -218,7 +218,7 @@ async def test_snapshot_missing_url():
     cfg = CameraConfig(enabled=True, rtsp_url="")
     client = CameraClient(config=cfg, printer_id="test-a1")
     with pytest.raises(CameraConfigError) as exc_info:
-        await client.snapshot()
+        await client.capture()
     assert "RTSP URL is not configured" in str(exc_info.value)
 
 
@@ -296,8 +296,8 @@ def test_camera_registry():
 # 10. TapoRTSPCamera & Protocol Conformance
 def test_tapo_and_generic_camera_protocol():
     from bambu_monitor.camera import (
+        CameraClient,
         CameraClientProtocol,
-        GenericRTSPCamera,
         TapoRTSPCamera,
         create_camera_client,
     )
@@ -308,7 +308,7 @@ def test_tapo_and_generic_camera_protocol():
     assert tapo.camera_type == "tapo_rtsp"
 
     generic_cfg = CameraConfig(type="generic_rtsp", rtsp_url="rtsp://admin:pass@192.168.1.60:554/live")
-    generic = GenericRTSPCamera(config=generic_cfg, printer_id="printer-2")
+    generic = CameraClient(config=generic_cfg, printer_id="printer-2")
     assert isinstance(generic, CameraClientProtocol)
     assert generic.camera_type == "generic_rtsp"
 
@@ -316,7 +316,7 @@ def test_tapo_and_generic_camera_protocol():
     assert isinstance(created_tapo, TapoRTSPCamera)
 
     created_generic = create_camera_client(generic_cfg, printer_id="printer-2")
-    assert isinstance(created_generic, GenericRTSPCamera)
+    assert type(created_generic) is CameraClient
 
 
 @pytest.mark.asyncio

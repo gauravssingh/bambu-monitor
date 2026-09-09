@@ -25,7 +25,7 @@ async def test_snapshot_endpoint_success(async_client: AsyncClient):
         rtsp_url="rtsp://admin:secret@192.168.1.55:554/stream1",
     )
     cam_client = CameraClient(config=cam_cfg, printer_id="test-a1")
-    cam_client.snapshot = AsyncMock(return_value=FAKE_JPEG)
+    cam_client.capture = AsyncMock(return_value=FAKE_JPEG)
     app.state.camera_registry.register("test-a1", cam_client)
 
     resp = await async_client.get("/api/v1/printers/test-a1/camera/snapshot")
@@ -54,7 +54,7 @@ async def test_snapshot_endpoint_timeout(async_client: AsyncClient):
     app = async_client._transport.app
     cam_cfg = CameraConfig(enabled=True, rtsp_url="rtsp://admin:secret@10.0.0.1:554/stream1")
     cam_client = CameraClient(config=cam_cfg, printer_id="test-a1")
-    cam_client.snapshot = AsyncMock(
+    cam_client.capture = AsyncMock(
         side_effect=CameraTimeoutError("Camera snapshot for 'test-a1' timed out after 5.0s")
     )
     app.state.camera_registry.register("test-a1", cam_client)
@@ -69,7 +69,7 @@ async def test_snapshot_endpoint_capture_error(async_client: AsyncClient):
     app = async_client._transport.app
     cam_cfg = CameraConfig(enabled=True, rtsp_url="rtsp://admin:secret@10.0.0.1:554/stream1")
     cam_client = CameraClient(config=cam_cfg, printer_id="test-a1")
-    cam_client.snapshot = AsyncMock(
+    cam_client.capture = AsyncMock(
         side_effect=CameraCaptureError("Failed to connect to camera stream: Connection refused")
     )
     app.state.camera_registry.register("test-a1", cam_client)
@@ -95,7 +95,7 @@ async def test_cli_camera_snap(tmp_path: Path, capsys):
         ]
     )
 
-    with patch.object(CameraClient, "snapshot", new_callable=AsyncMock) as mock_snap:
+    with patch.object(CameraClient, "capture", new_callable=AsyncMock) as mock_snap:
         mock_snap.return_value = FAKE_JPEG
         await cmd_camera_snap("cam-printer", output=str(out_file), settings=settings)
 

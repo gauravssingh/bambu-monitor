@@ -189,6 +189,34 @@ async def test_idempotent_duplicate_start_events(setup_manager):
 
 
 @pytest.mark.asyncio
+async def test_persistence_failure_during_creation_leaves_no_active_session(setup_manager):
+    """If persisting a brand-new session fails (disk full, DB locked), the
+    session must never be registered as active or attached to a worker —
+    _create_session persists before the caller marks it active, so a failure
+    here must surface as "timelapse never started" rather than leaving a
+    half-initialized, unpersisted session running in memory."""
+    m = setup_manager["manager"]
+    repo = setup_manager["repo"]
+
+    async def failing_save_session(session):
+        raise OSError("disk full (simulated)")
+
+    with patch.object(repo, "save_session", side_effect=failing_save_session):
+        evt = DomainEvent.create(
+            printer_id="printer-1",
+            event_type="print.started",
+            severity=EventSeverity.INFO,
+            payload={"job_id": "job-persist-fail", "filename": "test.3mf"},
+        )
+        with pytest.raises(OSError):
+            await m.on_print_started("printer-1", "job-persist-fail", evt.payload)
+
+    assert m.get_active_session("printer-1") is None
+
+    await m.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_harmless_duplicate_pause_and_resume(setup_manager):
     m = setup_manager["manager"]
 

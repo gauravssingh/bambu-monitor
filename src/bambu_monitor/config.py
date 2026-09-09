@@ -111,17 +111,6 @@ class DetectionConfig(BaseModel):
     stall: StallDetectionConfig = Field(default_factory=StallDetectionConfig)
 
 
-class TimelapseCameraConfig(BaseModel):
-    type: str = "tapo_rtsp"
-    url: str = Field(default="", description="RTSP URL for timelapse camera")
-    stream: str = Field(default="stream1", description="Stream profile, e.g. stream1 HD")
-
-    @field_validator("url", mode="before")
-    @classmethod
-    def _coerce_url(cls, v: object) -> str:
-        return "" if v is None else str(v).strip()
-
-
 class TimelapseCaptureConfig(BaseModel):
     interval_seconds: float = Field(default=5.0, ge=0.01, description="Snapshot interval in seconds")
     mode: str = Field(default="interval", description="Capture mode: interval (V1), layer or hybrid (future)")
@@ -151,7 +140,7 @@ class TimelapseRetentionConfig(BaseModel):
 class TimelapseConfig(BaseModel):
     enabled: bool = True
     storage_dir: str = Field(default="./data/timelapses", description="Root filesystem storage directory for timelapses")
-    camera: TimelapseCameraConfig = Field(default_factory=TimelapseCameraConfig)
+    camera: CameraConfig = Field(default_factory=CameraConfig)
     capture: TimelapseCaptureConfig = Field(default_factory=TimelapseCaptureConfig)
     video: TimelapseVideoConfig = Field(default_factory=TimelapseVideoConfig)
     overlay: TimelapseOverlayConfig = Field(default_factory=TimelapseOverlayConfig)
@@ -200,12 +189,11 @@ class Settings(BaseSettings):
                 for field_name in p_section.model_fields_set:
                     setattr(cfg_section, field_name, getattr(p_section, field_name))
 
-        if not cfg.camera.url and printer_cfg and printer_cfg.camera and printer_cfg.camera.rtsp_url:
-            cfg.camera.url = printer_cfg.camera.rtsp_url
-            if printer_cfg.camera.stream:
-                cfg.camera.stream = printer_cfg.camera.stream
-            if printer_cfg.camera.type:
-                cfg.camera.type = printer_cfg.camera.type
+        # When no dedicated timelapse camera URL is configured, timelapse
+        # shares the printer's own camera outright — same physical device,
+        # same connection settings (ffmpeg/probe/timeout), not just the URL.
+        if not cfg.camera.rtsp_url and printer_cfg and printer_cfg.camera and printer_cfg.camera.rtsp_url:
+            cfg.camera = printer_cfg.camera.model_copy(deep=True)
         return cfg
 
     @classmethod

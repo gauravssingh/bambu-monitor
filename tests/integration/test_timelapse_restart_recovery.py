@@ -206,6 +206,118 @@ async def test_restart_during_finalizing_retries_render(setup_env):
 
 
 @pytest.mark.asyncio
+async def test_restart_active_job_without_session_creates_one_at_original_start_time(setup_env):
+    """An active print with no timelapse session yet (e.g. timelapse was just
+    enabled, or the service crashed before print.started was handled) must
+    get a brand-new session on reconciliation, timestamped at the print's
+    actual start — not at the reconciliation moment — and must NOT emit
+    timelapse.started (this is a reattachment, not a new timelapse)."""
+    repo = setup_env["repo"]
+    t0 = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)
+
+    active_job = PrintJob.create(
+        printer_id="printer-1",
+        filename="model.3mf",
+        status=JobStatus.RUNNING,
+        started_at=t0,
+    )
+    active_job.id = "job_no_session_1"
+
+    events: list = []
+    m = setup_env["make_manager"]()
+
+    async def _capture_event(evt):
+        events.append(evt)
+
+    m.emit_event_cb = _capture_event
+
+    await m.reconcile_on_startup("printer-1", active_job)
+
+    session = m.get_active_session("printer-1")
+    assert session is not None
+    assert session.print_job_id == "job_no_session_1"
+    assert session.started_at == t0
+
+    persisted = await repo.get_session_by_job("job_no_session_1")
+    assert persisted is not None
+    assert persisted.storage_dir  # resolved to a real path, not left blank
+
+    assert not any(e.event_type == "timelapse.started" for e in events)
+
+    await m.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_restart_finalizes_stale_session_from_previous_job(setup_env):
+    """A session left ACTIVE in the DB for a job that is no longer the
+    printer's current job (crash mid-print, then a new print started before
+    the next restart) must be finalized, and a fresh session created for the
+    actually-active job."""
+    repo = setup_env["repo"]
+    storage = setup_env["storage"]
+    t0 = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)
+
+    stale_dir = storage.resolve_session_dir("printer-1", "session_stale_1", t0)
+    storage.ensure_session_dirs(stale_dir)
+    storage.save_frame(stale_dir, 1, MINI_JPEG)
+    stale_session = TimelapseSession.create(
+        printer_id="printer-1",
+        print_job_id="job_previous",
+        storage_dir=str(stale_dir),
+        started_at=t0,
+    )
+    stale_session.id = "session_stale_1"
+    await repo.save_session(stale_session)
+
+    t1 = datetime(2026, 9, 8, 13, 0, 0, tzinfo=timezone.utc)
+    active_job = PrintJob.create(
+        printer_id="printer-1",
+        filename="new_model.3mf",
+        status=JobStatus.RUNNING,
+        started_at=t1,
+    )
+    active_job.id = "job_current"
+
+    m = setup_env["make_manager"]()
+    await m.reconcile_on_startup("printer-1", active_job)
+    await m.shutdown()
+
+    # Stale session finalized, not left ACTIVE forever
+    stale_after = await repo.get_session("session_stale_1")
+    assert stale_after.status in (TimelapseStatus.COMPLETED, TimelapseStatus.FAILED)
+
+    # A new session was created for the printer's actual current job
+    new_session = await repo.get_session_by_job("job_current")
+    assert new_session is not None
+    assert new_session.started_at == t1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_on_startup_is_idempotent(setup_env):
+    """Calling reconcile_on_startup twice for the same printer/job (e.g. a
+    duplicate startup listener invocation) must not create a second session
+    or a second in-flight finalize task."""
+    repo = setup_env["repo"]
+    t0 = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)
+
+    active_job = PrintJob.create(
+        printer_id="printer-1",
+        filename="model.3mf",
+        status=JobStatus.RUNNING,
+        started_at=t0,
+    )
+    active_job.id = "job_dup_reconcile"
+
+    m = setup_env["make_manager"]()
+    await m.reconcile_on_startup("printer-1", active_job)
+    await m.reconcile_on_startup("printer-1", active_job)
+    await m.shutdown()
+
+    all_sessions = await repo.list_sessions_for_printer("printer-1")
+    assert len(all_sessions) == 1
+
+
+@pytest.mark.asyncio
 async def test_restart_orphaned_session_on_idle_printer_is_finalized(setup_env):
     repo = setup_env["repo"]
     storage = setup_env["storage"]

@@ -1,10 +1,8 @@
 """RTSP Camera integration package for Bambu Monitor."""
 
 from bambu_monitor.camera.client import (
-    BaseRTSPCamera,
     CameraClient,
     CameraClientProtocol,
-    GenericRTSPCamera,
     TapoRTSPCamera,
     create_camera_client,
 )
@@ -21,7 +19,6 @@ from bambu_monitor.camera.registry import CameraRegistry
 from bambu_monitor.camera.security import sanitize_rtsp_url
 
 __all__ = [
-    "BaseRTSPCamera",
     "CameraClient",
     "CameraClientProtocol",
     "CameraConfig",
@@ -33,7 +30,6 @@ __all__ = [
     "CameraHealth",
     "CameraRegistry",
     "CameraType",
-    "GenericRTSPCamera",
     "TapoRTSPCamera",
     "create_camera_client",
     "sanitize_rtsp_url",

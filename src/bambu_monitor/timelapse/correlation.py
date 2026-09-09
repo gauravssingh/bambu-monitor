@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from bambu_monitor.domain.events import DomainEvent
@@ -197,159 +197,30 @@ class TelemetryCorrelator:
             timeline.append(pt)
 
         # 2. Detect Thermal Anomalies
-        anomalies: List[TelemetryAnomaly] = []
         anomaly_counter = 1
-
-        # Hotend Temperature Drops
-        in_drop = False
-        drop_start_frame: Optional[TimelinePoint] = None
-        drop_min_temp = 999.0
-        drop_target = 0.0
-
-        for pt in timeline:
-            if (
-                pt.nozzle_temp is not None
-                and pt.nozzle_target is not None
-                and pt.nozzle_target >= 100.0
-            ):
-                is_below = pt.nozzle_temp <= (pt.nozzle_target - temp_drop_threshold)
-                if is_below:
-                    if not in_drop:
-                        in_drop = True
-                        drop_start_frame = pt
-                        drop_min_temp = pt.nozzle_temp
-                        drop_target = pt.nozzle_target
-                    else:
-                        drop_min_temp = min(drop_min_temp, pt.nozzle_temp)
-                else:
-                    if in_drop and drop_start_frame is not None:
-                        # Drop concluded
-                        delta = round(drop_target - drop_min_temp, 1)
-                        aid = f"anom-{anomaly_counter}"
-                        anomaly_counter += 1
-                        severity = "critical" if delta >= 25.0 else "warning"
-                        anom = TelemetryAnomaly(
-                            id=aid,
-                            type=TelemetryAnomalyType.NOZZLE_TEMP_DROP,
-                            severity=severity,
-                            start_frame=drop_start_frame.frame,
-                            end_frame=pt.frame - 1,
-                            timestamp_start=drop_start_frame.timestamp,
-                            timestamp_end=pt.timestamp,
-                            video_time_start=drop_start_frame.video_time_seconds,
-                            video_time_end=pt.video_time_seconds,
-                            description=f"Hotend temperature dropped to {drop_min_temp:.1f}°C ({delta:.1f}°C below target {drop_target:.1f}°C)",
-                            metrics={
-                                "min_temp": drop_min_temp,
-                                "target_temp": drop_target,
-                                "delta": delta,
-                            },
-                        )
-                        anomalies.append(anom)
-                        in_drop = False
-                        drop_start_frame = None
-
-        # Check if drop persisted until last frame
-        if in_drop and drop_start_frame is not None:
-            last_pt = timeline[-1]
-            delta = round(drop_target - drop_min_temp, 1)
-            aid = f"anom-{anomaly_counter}"
-            anomaly_counter += 1
-            severity = "critical" if delta >= 25.0 else "warning"
-            anomalies.append(
-                TelemetryAnomaly(
-                    id=aid,
-                    type=TelemetryAnomalyType.NOZZLE_TEMP_DROP,
-                    severity=severity,
-                    start_frame=drop_start_frame.frame,
-                    end_frame=last_pt.frame,
-                    timestamp_start=drop_start_frame.timestamp,
-                    timestamp_end=last_pt.timestamp,
-                    video_time_start=drop_start_frame.video_time_seconds,
-                    video_time_end=last_pt.video_time_seconds,
-                    description=f"Hotend temperature dropped to {drop_min_temp:.1f}°C ({delta:.1f}°C below target {drop_target:.1f}°C)",
-                    metrics={
-                        "min_temp": drop_min_temp,
-                        "target_temp": drop_target,
-                        "delta": delta,
-                    },
-                )
-            )
-
-        # Bed Temperature Drops
-        in_bed_drop = False
-        bed_start_frame: Optional[TimelinePoint] = None
-        bed_min_temp = 999.0
-        bed_target = 0.0
-
-        for pt in timeline:
-            if (
-                pt.bed_temp is not None
-                and pt.bed_target is not None
-                and pt.bed_target >= 35.0
-            ):
-                is_below = pt.bed_temp <= (pt.bed_target - temp_drop_threshold)
-                if is_below:
-                    if not in_bed_drop:
-                        in_bed_drop = True
-                        bed_start_frame = pt
-                        bed_min_temp = pt.bed_temp
-                        bed_target = pt.bed_target
-                    else:
-                        bed_min_temp = min(bed_min_temp, pt.bed_temp)
-                else:
-                    if in_bed_drop and bed_start_frame is not None:
-                        delta = round(bed_target - bed_min_temp, 1)
-                        aid = f"anom-{anomaly_counter}"
-                        anomaly_counter += 1
-                        severity = "critical" if delta >= 20.0 else "warning"
-                        anomalies.append(
-                            TelemetryAnomaly(
-                                id=aid,
-                                type=TelemetryAnomalyType.BED_TEMP_DROP,
-                                severity=severity,
-                                start_frame=bed_start_frame.frame,
-                                end_frame=pt.frame - 1,
-                                timestamp_start=bed_start_frame.timestamp,
-                                timestamp_end=pt.timestamp,
-                                video_time_start=bed_start_frame.video_time_seconds,
-                                video_time_end=pt.video_time_seconds,
-                                description=f"Bed temperature dropped to {bed_min_temp:.1f}°C ({delta:.1f}°C below target {bed_target:.1f}°C)",
-                                metrics={
-                                    "min_temp": bed_min_temp,
-                                    "target_temp": bed_target,
-                                    "delta": delta,
-                                },
-                            )
-                        )
-                        in_bed_drop = False
-                        bed_start_frame = None
-
-        if in_bed_drop and bed_start_frame is not None:
-            last_pt = timeline[-1]
-            delta = round(bed_target - bed_min_temp, 1)
-            aid = f"anom-{anomaly_counter}"
-            anomaly_counter += 1
-            severity = "critical" if delta >= 20.0 else "warning"
-            anomalies.append(
-                TelemetryAnomaly(
-                    id=aid,
-                    type=TelemetryAnomalyType.BED_TEMP_DROP,
-                    severity=severity,
-                    start_frame=bed_start_frame.frame,
-                    end_frame=last_pt.frame,
-                    timestamp_start=bed_start_frame.timestamp,
-                    timestamp_end=last_pt.timestamp,
-                    video_time_start=bed_start_frame.video_time_seconds,
-                    video_time_end=last_pt.video_time_seconds,
-                    description=f"Bed temperature dropped to {bed_min_temp:.1f}°C ({delta:.1f}°C below target {bed_target:.1f}°C)",
-                    metrics={
-                        "min_temp": bed_min_temp,
-                        "target_temp": bed_target,
-                        "delta": delta,
-                    },
-                )
-            )
+        nozzle_anomalies, anomaly_counter = TelemetryCorrelator._detect_temperature_drops(
+            timeline,
+            get_temp=lambda p: p.nozzle_temp,
+            get_target=lambda p: p.nozzle_target,
+            min_target=100.0,
+            threshold=temp_drop_threshold,
+            critical_delta=25.0,
+            anomaly_type=TelemetryAnomalyType.NOZZLE_TEMP_DROP,
+            label="Hotend",
+            start_counter=anomaly_counter,
+        )
+        bed_anomalies, anomaly_counter = TelemetryCorrelator._detect_temperature_drops(
+            timeline,
+            get_temp=lambda p: p.bed_temp,
+            get_target=lambda p: p.bed_target,
+            min_target=35.0,
+            threshold=temp_drop_threshold,
+            critical_delta=20.0,
+            anomaly_type=TelemetryAnomalyType.BED_TEMP_DROP,
+            label="Bed",
+            start_counter=anomaly_counter,
+        )
+        anomalies: List[TelemetryAnomaly] = [*nozzle_anomalies, *bed_anomalies]
 
         # 3. Correlate Domain Events
         if events:
@@ -547,3 +418,75 @@ class TelemetryCorrelator:
             layers=layer_correlations,
             timeline=timeline,
         )
+
+    @staticmethod
+    def _detect_temperature_drops(
+        timeline: List[TimelinePoint],
+        get_temp: Callable[[TimelinePoint], Optional[float]],
+        get_target: Callable[[TimelinePoint], Optional[float]],
+        min_target: float,
+        threshold: float,
+        critical_delta: float,
+        anomaly_type: TelemetryAnomalyType,
+        label: str,
+        start_counter: int,
+    ) -> Tuple[List[TelemetryAnomaly], int]:
+        """Scan a timeline for sustained below-target temperature drops.
+
+        Shared by hotend and bed detection: both are the same "temperature
+        stayed too far below its target for a stretch of frames" state
+        machine, parametrized only by which fields and thresholds apply.
+        """
+        anomalies: List[TelemetryAnomaly] = []
+        counter = start_counter
+        in_drop = False
+        drop_start: Optional[TimelinePoint] = None
+        min_temp = 999.0
+        target = 0.0
+
+        def close_drop(end_frame: int, timestamp_end: datetime, video_time_end: float) -> None:
+            nonlocal counter
+            assert drop_start is not None
+            delta = round(target - min_temp, 1)
+            aid = f"anom-{counter}"
+            counter += 1
+            severity = "critical" if delta >= critical_delta else "warning"
+            anomalies.append(
+                TelemetryAnomaly(
+                    id=aid,
+                    type=anomaly_type,
+                    severity=severity,
+                    start_frame=drop_start.frame,
+                    end_frame=end_frame,
+                    timestamp_start=drop_start.timestamp,
+                    timestamp_end=timestamp_end,
+                    video_time_start=drop_start.video_time_seconds,
+                    video_time_end=video_time_end,
+                    description=f"{label} temperature dropped to {min_temp:.1f}°C ({delta:.1f}°C below target {target:.1f}°C)",
+                    metrics={"min_temp": min_temp, "target_temp": target, "delta": delta},
+                )
+            )
+
+        for pt in timeline:
+            temp = get_temp(pt)
+            tgt = get_target(pt)
+            if temp is not None and tgt is not None and tgt >= min_target:
+                if temp <= (tgt - threshold):
+                    if not in_drop:
+                        in_drop = True
+                        drop_start = pt
+                        min_temp = temp
+                        target = tgt
+                    else:
+                        min_temp = min(min_temp, temp)
+                else:
+                    if in_drop and drop_start is not None:
+                        close_drop(pt.frame - 1, pt.timestamp, pt.video_time_seconds)
+                        in_drop = False
+                        drop_start = None
+
+        if in_drop and drop_start is not None:
+            last_pt = timeline[-1]
+            close_drop(last_pt.frame, last_pt.timestamp, last_pt.video_time_seconds)
+
+        return anomalies, counter
