@@ -4,6 +4,11 @@ application:
   log_level: INFO
   public_base_url: ${BAMBU_MONITOR_PUBLIC_URL:http://localhost:8000}
   api_token: ${BAMBU_MONITOR_API_TOKEN:}
+  # When no api_token is set, tokenless API access is allowed from loopback
+  # and from home-LAN clients (RFC1918 / IPv6 ULA & link-local). Both default
+  # to true; configuring an api_token disables all tokenless access.
+  # allow_unauthenticated_loopback: true
+  # allow_unauthenticated_lan: true
 
 database:
   path: ./data/bambu.db

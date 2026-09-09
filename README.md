@@ -2,7 +2,7 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 149 Passed](https://img.shields.io/badge/tests-149%20passed-brightgreen.svg)]()
+[![Tests: 184 Passed](https://img.shields.io/badge/tests-184%20passed-brightgreen.svg)]()
 [![Architecture: Phase 1--4 + Camera Timelapse Complete](https://img.shields.io/badge/architecture-Phase%201--4%20%2B%20Camera%20Timelapse%20Complete-blueviolet.svg)]()
 [![Database: SQLite WAL](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)]()
 
@@ -244,6 +244,13 @@ events:
 
 Base URL: `http://localhost:8000`
 
+### API Access Control
+The API binds to the local network only. Its access policy is controlled by the `application` section of [config.yaml](config.yaml):
+
+* **When an API token is configured** (`BAMBU_MONITOR_API_TOKEN` / `application.api_token`), every request must present it in the `X-API-Key` header or it is rejected with `401 Unauthorized`. Use this mode when exposing the API beyond the trusted LAN (e.g. via a VPN or reverse proxy).
+* **When no token is configured**, requests are admitted without a token from loopback (`127.0.0.1` / `::1`) and from home-LAN clients on private subnets (RFC 1918 `10/8`, `172.16/12`, `192.168/16`, plus IPv6 ULA `fc00::/7` and link-local `fe80::/10`). Both bypasses are independently gated by `allow_unauthenticated_loopback` and `allow_unauthenticated_lan` (default `true`); every other client is refused with `403 Forbidden`.
+* **DNS-rebinding defense**: the tokenless bypasses above only apply when the request's `Host` header is an IP literal (or `localhost`). A malicious web page that rebinds DNS to your printer's IP still carries its own hostname in `Host` and is rejected. Configuring `application.api_token` disables all tokenless access.
+
 ### Health & Status
 * `GET /health` — Subsystem health check (SQLite WAL, memory status, outbox counts, printer summaries).
 * `GET /api/v1/outbox/status` — Outbox queue counts (`pending`, `delivering`, `delivered`, `failed_dlq`).
@@ -281,7 +288,7 @@ Base URL: `http://localhost:8000`
 * `POST /api/v1/printers/{printer_id}/alerts/{alert_id}/acknowledge` — Transition alert from `ACTIVE` → `ACKNOWLEDGED`.
 
 ### Timelapses
-* `GET /api/v1/printers/{printer_id}/timelapses/gallery` — Dedicated responsive HTML card gallery for browsing all timelapses recorded for a printer.
+* `GET /api/v1/printers/{printer_id}/timelapses/gallery` — Polished media-library gallery page (card/list views, live search, status/date/frames filters) for browsing all timelapses recorded for a printer.
 * `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/view` — Interactive HTML5 video player and print statistics interface.
 * `GET /api/v1/printers/{printer_id}/timelapses` — List all recorded timelapse sessions (JSON).
 * `GET /api/v1/printers/{printer_id}/timelapses/{session_id}` — Detailed session status, pause records, and manifest (JSON).
@@ -289,6 +296,8 @@ Base URL: `http://localhost:8000`
 * `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/metadata` — Query frame-by-frame visual history sidecar records (`frames.jsonl`).
 * `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/frames` — List captured frame indices and retrieval URLs.
 * `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/frames/{sequence}` — Retrieve an individual JPEG frame (`image/jpeg`).
+
+> **Video variants**: All four video endpoints — the per-printer `.../video` and `.../stream`, plus their global aliases `/api/v1/timelapses/{timelapse_id}/video` and `.../stream` — accept `?variant=layers` to serve the layer-change-only cut (`timelapse_layers_*.mp4`) when one has been rendered for the session. A variant that does not exist for that session returns `404`.
 
 ### Real-Time Events (SSE)
 * `GET /api/v1/printers/{printer_id}/events/stream` — Real-time Server-Sent Events stream for live dashboards.
@@ -347,13 +356,15 @@ Bambu Monitor synchronizes the printer's sensor telemetry with every single visu
 * **Per-Frame Sidecar Dataset (`frames.jsonl`)**: Each frame record logs live `nozzle_temp`, `nozzle_target`, `bed_temp`, `bed_target`, `layer`, `progress`, and `speed_level`.
 * **Automated Thermal Anomaly Detection**: Detects sudden hotend temperature drops (e.g. `> 10°C` below target while printing) and bed drops, flagging the exact starting frame, recovery frame, and delta.
 * **Extrusion Stall & Event Correlation**: Correlates motion stalls (`print.possible_blockage`), pauses (`print.paused`), filament runouts (`filament.runout`), and speed shifts (`print.speed_changed`) to their exact video timestamps and frame numbers.
-* **REST API**: `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/correlation` returns the full synchronized report and timeline.
+* **REST API**: `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/correlation` returns the full synchronized report and timeline (including fan speed per timeline point).
+* **Optional HUD Burn-In**: With `timelapse.overlay.enabled: true`, rendered MP4s get a translucent telemetry banner burned along the bottom edge of every frame (layer/progress, hotend & bed temperatures, anomaly badge), so stats remain visible outside the web player. The camera's own timestamp occupies the top of the frame, which is why the banner sits at the bottom.
 
 ### 5. Interactive Web UI Player (`/view`)
 Open `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/view` in any browser for an enhanced player:
 * **Live Reactive HUD**: Displays real-time Hotend, Bed, Layer, Progress, and Speed corresponding to the video's active playback frame.
 * **Interactive SVG Temperature Profile**: An inline dual-line curve displaying hotend and bed temperatures across the video. Clicking anywhere on the chart scrubs the video to that exact point.
 * **Click-to-Jump Anomalies**: Badges for detected thermal drops and stalls that jump video playback directly to the fault frame.
+* **Layer-Only Cut Download**: When a layer-change-only render exists for the session, a `Layer-only cut` download button (`.../video?variant=layers`) appears in the player toolbar.
 
 ---
 
@@ -362,6 +373,7 @@ Open `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/view` in any bro
 1. **Local Network Privacy**: Bambu Monitor communicates with Bambu printers exclusively over the local subnet (RFC 1918). No telemetry is transmitted to cloud servers.
 2. **Scoped TLS Certificate Bypass**: Bambu Lab printers in LAN mode use self-signed X.509 certificates on port 8883. Disabling host verification (`tls_verify: false`) is **strictly isolated to local printer connections** and is never applied to outbound consumer webhooks.
 3. **Secret Isolation**: Access codes are stored in the host OS Keyring. The database contains no credentials, making SQLite database files completely safe for backup and inspection.
+4. **API Access Control**: Without a configured token, the REST/SSE API is open only to loopback and home-LAN clients (RFC 1918 / IPv6 ULA & link-local) — see [API Access Control](#api-access-control). Setting `BAMBU_MONITOR_API_TOKEN` requires every request to present it as `X-API-Key`. DNS rebinding is blocked by requiring an IP-literal `Host` header on all tokenless bypasses.
 
 ---
 
@@ -370,7 +382,7 @@ Open `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/view` in any bro
 The test suite is fully decoupled from physical printer hardware using stored fixtures:
 
 ```bash
-# Run the complete test suite (149 unit and integration tests)
+# Run the complete test suite (184 unit and integration tests)
 pytest -v
 
 # Run system and network diagnostics on your environment
