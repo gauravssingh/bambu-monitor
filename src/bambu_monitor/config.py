@@ -39,6 +39,8 @@ class ApplicationConfig(BaseModel):
     public_base_url: str = "http://localhost:8000"
     api_token: Optional[str] = None
     allow_unauthenticated_loopback: bool = True
+    # Allow tokenless access from private-subnet (home LAN) clients.
+    allow_unauthenticated_lan: bool = True
 
 
 class DatabaseConfig(BaseModel):

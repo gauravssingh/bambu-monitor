@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import hmac
+import ipaddress
 import json
 import logging
 from datetime import datetime
@@ -80,8 +81,36 @@ def get_timelapse_manager(request: Request) -> TimelapseManager:
     return request.app.state.timelapse_manager
 
 
+def _host_header_hostname(request: Request) -> str:
+    """Extract the hostname portion of the Host header (sans port, IPv6 brackets)."""
+    host_header = (request.headers.get("host") or "").strip().lower()
+    if host_header.startswith("["):
+        return host_header.split("]", 1)[0].lstrip("[")
+    if ":" in host_header:
+        return host_header.rsplit(":", 1)[0]
+    return host_header
+
+
+# Explicit trusted home-LAN ranges (RFC1918 + IPv6 ULA/link-local). Deliberately
+# avoids ipaddress.is_private, which also counts documentation/reserved ranges
+# (192.0.2.0/24, 203.0.113.0/24, ...) that must stay unauthorized.
+_LAN_NETWORKS = tuple(
+    ipaddress.ip_network(n)
+    for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fe80::/10")
+)
+
+
+def _is_private_lan_ip(host: str) -> bool:
+    """True for RFC1918/ULA/link-local addresses (trusted home-LAN clients)."""
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(addr.version == net.version and addr in net for net in _LAN_NETWORKS)
+
+
 async def require_api_access(request: Request) -> None:
-    """Restrict the local control plane to loopback or a configured API token."""
+    """Restrict the local control plane to loopback, home LAN, or a configured API token."""
     settings = request.app.state.settings
     configured_token = settings.application.api_token
     presented_token = request.headers.get("X-API-Key", "")
@@ -100,15 +129,22 @@ async def require_api_access(request: Request) -> None:
     if settings.application.allow_unauthenticated_loopback and client_host in {"127.0.0.1", "::1"}:
         # DNS-rebinding defense: a remote page rebinding to 127.0.0.1 still
         # presents a non-loopback Host header, which browsers will not spoof.
-        host_header = (request.headers.get("host") or "").strip().lower()
-        if host_header.startswith("["):
-            hostname = host_header.split("]", 1)[0].lstrip("[")
-        elif ":" in host_header:
-            hostname = host_header.rsplit(":", 1)[0]
-        else:
-            hostname = host_header
-        if hostname in {"127.0.0.1", "::1", "localhost"}:
+        if _host_header_hostname(request) in {"127.0.0.1", "::1", "localhost"}:
             return
+
+    if settings.application.allow_unauthenticated_lan and _is_private_lan_ip(client_host):
+        # Home-LAN access without a token. DNS-rebinding defense: a page
+        # rebound to a LAN IP still carries the attacker's domain in the
+        # Host header, so only IP-literal (or localhost) hosts are allowed.
+        hostname = _host_header_hostname(request)
+        try:
+            ipaddress.ip_address(hostname)
+            return  # Host is a bare IP literal (browsers on the LAN)
+        except ValueError:
+            if hostname == "localhost":
+                return
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Local access only")
+
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Local access only")
 
 

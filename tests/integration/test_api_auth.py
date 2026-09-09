@@ -29,6 +29,40 @@ async def test_remote_client_is_rejected(test_settings, test_db, repositories):
 
 
 @pytest.mark.asyncio
+async def test_private_lan_client_is_allowed(test_settings, test_db, repositories):
+    """Home-LAN clients (RFC1918) are allowed without a token when no token is configured."""
+    app = create_app(test_settings)
+    transport = ASGITransport(app=app, client=("192.168.68.55", 55555))
+    async with AsyncClient(transport=transport, base_url="http://192.168.68.55:8000") as client:
+        async with app.router.lifespan_context(app):
+            resp = await client.get("/health")
+            assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_private_lan_client_with_foreign_host_header_is_rejected(test_settings, test_db, repositories):
+    """DNS rebinding: LAN socket but an attacker-controlled Host header must not pass."""
+    app = create_app(test_settings)
+    transport = ASGITransport(app=app, client=("192.168.68.55", 55555))
+    async with AsyncClient(transport=transport, base_url="http://evil.example.com") as client:
+        async with app.router.lifespan_context(app):
+            resp = await client.get("/health")
+            assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_lan_access_disabled_rejects_lan_client(test_settings, test_db, repositories):
+    """allow_unauthenticated_lan=False must keep the API loopback/token only."""
+    test_settings.application.allow_unauthenticated_lan = False
+    app = create_app(test_settings)
+    transport = ASGITransport(app=app, client=("192.168.68.55", 55555))
+    async with AsyncClient(transport=transport, base_url="http://192.168.68.55:8000") as client:
+        async with app.router.lifespan_context(app):
+            resp = await client.get("/health")
+            assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_loopback_client_with_foreign_host_header_is_rejected(test_settings, test_db, repositories):
     """DNS rebinding: loopback socket but a remote Host header must not pass."""
     app = create_app(test_settings)
