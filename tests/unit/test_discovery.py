@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from bambu_monitor.bambu.discovery import (
-    DiscoveredPrinter,
     DiscoveryProtocol,
     parse_discovery_packet,
 )

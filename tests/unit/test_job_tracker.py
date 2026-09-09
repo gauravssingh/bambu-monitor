@@ -2,15 +2,17 @@
 
 import pytest
 from datetime import datetime, timezone
-from bambu_monitor.domain.print_job import JobStatus, PrintJob, generate_job_id
+from bambu_monitor.domain.print_job import JobStatus, generate_job_id
 from bambu_monitor.domain.telemetry import TelemetryPatch
 
 
-def test_deterministic_job_id():
+def test_job_ids_unique_within_same_second():
+    """Two prints of the same file starting within the same wall-clock second
+    must not collide (epoch alone is only second-precise)."""
     t1 = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)
     job_id_1 = generate_job_id("bambu-a1", "phone_stand.3mf", t1)
     job_id_2 = generate_job_id("bambu-a1", "phone_stand.3mf", t1)
-    assert job_id_1 == job_id_2
+    assert job_id_1 != job_id_2
     assert "bambu_a1" in job_id_1
     assert "phone_stand" in job_id_1
     assert str(int(t1.timestamp())) in job_id_1
@@ -101,3 +103,71 @@ async def test_job_full_lifecycle(state_manager, repositories):
     assert completed_db_job.status == JobStatus.COMPLETED
     assert completed_db_job.completed_at is not None
     assert completed_db_job.duration_seconds == 3600  # 1 hour
+
+
+@pytest.mark.asyncio
+async def test_late_arriving_filename_renames_job_instead_of_superseding(state_manager, repositories):
+    """The first telemetry report often lacks subtask_name; when the real
+    filename arrives later, the same physical print must keep ONE job with
+    the updated name — not a phantom FAILED job plus a duplicate."""
+    printer_id = "test-a1"
+    job_repo = repositories["job"]
+    t0 = datetime(2026, 9, 8, 10, 0, 0, tzinfo=timezone.utc)
+
+    # 1. First report: PRINTING with no filename -> placeholder job
+    p1 = TelemetryPatch(printer_id=printer_id, timestamp=t0, gcode_state="RUNNING", progress=5)
+    await state_manager.apply_patch(p1)
+    job = state_manager.get_active_job(printer_id)
+    assert job is not None
+    assert job.filename == "print"
+    original_job_id = job.id
+
+    # 2. Later report: the real filename arrives
+    p2 = TelemetryPatch(
+        printer_id=printer_id,
+        timestamp=t0.replace(minute=1),
+        gcode_state="RUNNING",
+        progress=10,
+        subtask_name="benchy.gcode",
+    )
+    await state_manager.apply_patch(p2)
+
+    job_after = state_manager.get_active_job(printer_id)
+    assert job_after.id == original_job_id          # same physical print
+    assert job_after.filename == "benchy.gcode"     # renamed in place
+    assert job_after.status == JobStatus.RUNNING    # not FAILED
+
+    # Exactly one job row for this print in the DB
+    jobs = await job_repo.list_for_printer(printer_id, limit=10)
+    assert len(jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_task_id_mismatch_still_supersedes(state_manager, repositories):
+    """A genuinely different print (task/subtask ID mismatch) must still
+    supersede the old job rather than rename it."""
+    printer_id = "test-a1"
+    t0 = datetime(2026, 9, 8, 10, 0, 0, tzinfo=timezone.utc)
+
+    p1 = TelemetryPatch(
+        printer_id=printer_id, timestamp=t0, gcode_state="RUNNING",
+        subtask_name="a.gcode", task_id="task-1",
+    )
+    await state_manager.apply_patch(p1)
+    first_job = state_manager.get_active_job(printer_id)
+
+    p2 = TelemetryPatch(
+        printer_id=printer_id, timestamp=t0.replace(minute=5), gcode_state="RUNNING",
+        subtask_name="b.gcode", task_id="task-2",
+    )
+    await state_manager.apply_patch(p2)
+
+    new_job = state_manager.get_active_job(printer_id)
+    assert new_job.id != first_job.id
+    assert new_job.filename == "b.gcode"
+    jobs = await job_repo_list(state_manager, printer_id)
+    assert len(jobs) == 2
+
+
+async def job_repo_list(state_manager, printer_id):
+    return await state_manager.job_repo.list_for_printer(printer_id, limit=10)

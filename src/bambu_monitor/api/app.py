@@ -23,7 +23,7 @@ from bambu_monitor.storage.repositories import (
     PrinterRepository,
     TimelapseRepository,
 )
-from bambu_monitor.camera import CameraClient, CameraRegistry, create_camera_client
+from bambu_monitor.camera import CameraRegistry, create_camera_client
 from bambu_monitor.timelapse import TimelapseManager, TimelapseRenderer, TimelapseStorage
 from bambu_monitor.api.routes import router
 
@@ -39,8 +39,8 @@ async def _periodic_state_flusher(state_manager: StateManager, settings: Setting
             for printer_id in list(state_manager._states.keys()):
                 try:
                     await state_manager.flush_state_to_db(printer_id)
-                except Exception as exc:
-                    logger.debug("Periodic state flush error for %s: %s", printer_id, exc)
+                except Exception:
+                    logger.exception("Periodic state flush error for %s", printer_id)
     except asyncio.CancelledError:
         pass
 
@@ -73,8 +73,8 @@ async def _background_ip_tracker(
                             if db_printer:
                                 db_printer.host = disc.ip
                                 await printer_repo.save(db_printer)
-            except Exception as exc:
-                logger.debug("Background IP discovery check error: %s", exc)
+            except Exception:
+                logger.warning("Background IP discovery check error", exc_info=True)
     except asyncio.CancelledError:
         pass
 
@@ -195,6 +195,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     outbox_worker = None
     if settings.events.delivery.enabled:
         from bambu_monitor.delivery import OutboxDeliveryWorker
+        if not settings.events.delivery.secret:
+            logger.warning(
+                "Webhook delivery is enabled without a shared secret: events "
+                "will be sent unsigned (no X-Hub-Signature-256 header). Set "
+                "EVENT_SECRET to enable HMAC verification at the receiver."
+            )
         outbox_worker = OutboxDeliveryWorker(
             outbox_repo=outbox_repo,
             printer_repo=printer_repo,
@@ -220,6 +226,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.exception("Background task raised during shutdown")
 
     for client in mqtt_clients.values():
         try:

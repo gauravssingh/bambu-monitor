@@ -1,6 +1,5 @@
 """Integration tests for camera REST endpoints and CLI commands."""
 
-import io
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 import pytest
@@ -13,7 +12,7 @@ from bambu_monitor.camera import (
     CameraTimeoutError,
 )
 from bambu_monitor.cli.commands import cmd_camera_snap, cmd_camera_test
-from bambu_monitor.config import ApplicationConfig, DatabaseConfig, PrinterConfig, Settings
+from bambu_monitor.config import PrinterConfig, Settings
 
 FAKE_JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb"
 

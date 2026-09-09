@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import io
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
-from bambu_monitor.api.app import create_app
 from bambu_monitor.cli.commands import (
     cmd_devices,
     cmd_doctor,
@@ -141,14 +137,14 @@ async def test_discovery_onboarding_and_dhcp_ip_tracking(test_settings: Settings
     from bambu_monitor.bambu.client import BambuMqttClient
     from bambu_monitor.api.app import _background_ip_tracker
 
-    initial_ip = "192.168.68.57"
-    new_dhcp_ip = "192.168.68.105"
+    initial_ip = "192.168.1.100"
+    new_dhcp_ip = "192.168.1.105"
     serial = "0309TEST9999000"
 
     # Step 1: Discover and onboard with realistic LAN IP
     with patch("bambu_monitor.cli.commands.discover_printers", new_callable=AsyncMock) as mock_disc, \
          patch("bambu_monitor.cli.commands.test_printer_connection", new_callable=AsyncMock) as mock_conn, \
-         patch("bambu_monitor.cli.commands.store_access_code") as mock_store:
+         patch("bambu_monitor.cli.commands.store_access_code"):
 
         mock_disc.return_value = [
             DiscoveredPrinter(serial=serial, ip=initial_ip, model="A1", name="Bambu A1")

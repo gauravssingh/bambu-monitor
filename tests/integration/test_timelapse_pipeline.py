@@ -3,12 +3,11 @@
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 import pytest
 
 from bambu_monitor.camera import CameraConfig, CameraConnectionError, CameraRegistry, TapoRTSPCamera
-from bambu_monitor.config import ApplicationConfig, DatabaseConfig, PrinterConfig, Settings, TimelapseConfig
-from bambu_monitor.domain.events import DomainEvent, EventSeverity
+from bambu_monitor.config import PrinterConfig, Settings, TimelapseConfig
 from bambu_monitor.domain.printer import Printer
 from bambu_monitor.domain.telemetry import TelemetryPatch
 from bambu_monitor.state.manager import StateManager

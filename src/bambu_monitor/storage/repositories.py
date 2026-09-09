@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from bambu_monitor.domain.alerts import Alert, AlertStatus
+from bambu_monitor.domain.alerts import Alert
 from bambu_monitor.domain.events import DomainEvent, OutboxMessage, OutboxStatus
 from bambu_monitor.domain.printer import CurrentPrinterState, Printer
-from bambu_monitor.domain.print_job import JobStatus, PrintJob
+from bambu_monitor.domain.print_job import PrintJob
 from bambu_monitor.storage.database import Database
 from bambu_monitor.storage.models import (
     format_datetime,
@@ -19,6 +20,8 @@ from bambu_monitor.storage.models import (
     row_to_print_job,
     row_to_printer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PrinterRepository:
@@ -320,6 +323,7 @@ class EventRepository:
                 """
                 INSERT INTO outbox (event_id, printer_id, destination, payload_json, status, attempts, created_at)
                 VALUES (?, ?, ?, ?, 'pending', 0, ?)
+                ON CONFLICT(event_id, destination) DO NOTHING
                 """,
                 (
                     event.event_id,
@@ -384,10 +388,13 @@ class OutboxRepository:
                 """
                 INSERT INTO outbox (event_id, printer_id, destination, payload_json, status, attempts, created_at)
                 VALUES (?, ?, ?, ?, 'pending', 0, ?)
+                ON CONFLICT(event_id, destination) DO NOTHING
                 """,
                 (event.event_id, event.printer_id, destination, payload_json, now_str),
             )
-            msg_id = cursor.lastrowid
+            # rowcount == 0 means the conflict guard suppressed the insert:
+            # the event was already enqueued, so no new work item was created.
+            msg_id = cursor.lastrowid if cursor.rowcount else None
             await conn.commit()
             return OutboxMessage(
                 id=msg_id,
@@ -431,6 +438,54 @@ class OutboxRepository:
         finally:
             await conn.close()
 
+    async def begin_delivery(self, message_id: int, attempts: int, last_attempt_at: datetime) -> bool:
+        """Atomically claim a pending message for delivery.
+
+        Returns True only if this caller performed the pending -> delivering
+        transition (compare-and-set), preventing concurrent double delivery.
+        """
+        conn = await self.db.get_connection()
+        try:
+            cursor = await conn.execute(
+                """
+                UPDATE outbox
+                SET status = 'delivering', attempts = ?, last_attempt_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (attempts, format_datetime(last_attempt_at), message_id),
+            )
+            await conn.commit()
+            return bool(cursor.rowcount)
+        finally:
+            await conn.close()
+
+    async def reclaim_stale_delivering(self, stale_after_seconds: float) -> int:
+        """Reset 'delivering' rows whose last attempt is older than the cutoff
+        back to 'pending' (crash recovery: the delivering outcome is unknown)."""
+        conn = await self.db.get_connection()
+        try:
+            cutoff = datetime.now(timezone.utc).timestamp() - stale_after_seconds
+            cutoff_dt = datetime.fromtimestamp(cutoff, tz=timezone.utc)
+            cursor = await conn.execute(
+                """
+                UPDATE outbox
+                SET status = 'pending'
+                WHERE status = 'delivering'
+                  AND last_attempt_at IS NOT NULL
+                  AND last_attempt_at < ?
+                """,
+                (format_datetime(cutoff_dt),),
+            )
+            await conn.commit()
+            if cursor.rowcount:
+                logger.warning(
+                    "Reclaimed %d stale 'delivering' outbox message(s) after crash/timeout",
+                    cursor.rowcount,
+                )
+            return cursor.rowcount or 0
+        finally:
+            await conn.close()
+
     async def update_status(
         self,
         message_id: int,
@@ -449,7 +504,7 @@ class OutboxRepository:
                     attempts = coalesce(?, attempts),
                     last_attempt_at = coalesce(?, last_attempt_at),
                     delivered_at = coalesce(?, delivered_at),
-                    error_message = ?
+                    error_message = coalesce(?, error_message)
                 WHERE id = ?
                 """,
                 (

@@ -8,18 +8,15 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
 
 from bambu_monitor.config import Settings
-from bambu_monitor.domain.alerts import Alert, AlertSeverity, AlertStatus
+from bambu_monitor.domain.alerts import Alert, AlertSeverity
 from bambu_monitor.domain.events import (
     DomainEvent,
     EventSeverity,
-    OutboxMessage,
 )
 from bambu_monitor.domain.printer import (
     CurrentPrinterState,
-    Printer,
     PrinterState,
     PrintJobSnapshot,
-    TemperatureInfo,
 )
 from bambu_monitor.domain.print_job import JobStatus, PrintJob, sanitize_filename
 from bambu_monitor.domain.telemetry import TelemetryPatch
@@ -62,13 +59,17 @@ class StateManager:
         self._active_jobs: Dict[str, PrintJob] = {}
         # Active alerts: printer_id -> alert_type -> Alert
         self._active_alerts: Dict[str, Dict[str, Alert]] = {}
-        
+
         # Stall tracking: printer_id -> (progress, layer, remaining_seconds, last_change_time)
         self._last_progress_marker: Dict[str, Tuple[int, int, Optional[int], datetime]] = {}
 
         # SSE subscriber queues: printer_id -> set of asyncio.Queue
         self._subscribers: Dict[str, Set[asyncio.Queue[DomainEvent]]] = {}
-        self._lock = asyncio.Lock()
+        # Per-printer pipeline locks: serialize state mutation AND event emission
+        # for a single printer (preserving event order) without letting one
+        # printer's slow event listener (e.g. a multi-second camera capture)
+        # stall telemetry for every other printer.
+        self._printer_locks: Dict[str, asyncio.Lock] = {}
 
         # External and subsystem event listeners (e.g. TimelapseManager)
         self._event_listeners: List[Any] = []
@@ -95,6 +96,11 @@ class StateManager:
             )
             self._active_alerts[printer_id] = {}
             self._subscribers[printer_id] = set()
+            self._printer_locks.setdefault(printer_id, asyncio.Lock())
+
+    def _printer_lock(self, printer_id: str) -> asyncio.Lock:
+        """Return the pipeline lock for one printer, creating it on demand."""
+        return self._printer_locks.setdefault(printer_id, asyncio.Lock())
 
     def get_state(self, printer_id: str) -> Optional[CurrentPrinterState]:
         """O(1) in-memory state lookup."""
@@ -114,7 +120,7 @@ class StateManager:
         if printer_id not in self._subscribers:
             self._subscribers[printer_id] = set()
 
-        queue: asyncio.Queue[DomainEvent] = asyncio.Queue()
+        queue: asyncio.Queue[DomainEvent] = asyncio.Queue(maxsize=256)
         self._subscribers[printer_id].add(queue)
         try:
             while True:
@@ -153,11 +159,21 @@ class StateManager:
         destination = self.settings.events.delivery.endpoint
         await self.event_repo.save_and_enqueue(event, destination)
 
-        # 2. Broadcast to SSE subscribers
+        # 2. Broadcast to SSE subscribers (bounded queues; drop oldest for
+        # slow consumers rather than growing memory without limit)
         queues = self._subscribers.get(event.printer_id, set())
         for q in list(queues):
             try:
                 q.put_nowait(event)
+            except asyncio.QueueFull:
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    q.put_nowait(event)
+                except Exception:
+                    logger.warning("Dropped SSE event for slow subscriber of %s", event.printer_id)
             except Exception as e:
                 logger.debug("Failed to put event into SSE queue: %s", e)
 
@@ -181,6 +197,19 @@ class StateManager:
             return True
         return False
 
+    @staticmethod
+    def _is_hard_identity_change(job: PrintJob, patch: TelemetryPatch) -> bool:
+        """True only for task/subtask-ID mismatches — unambiguous evidence of a
+        different print. A name-only mismatch is not: printers frequently send
+        the filename on a later report than the first progress delta."""
+        metadata = job.metadata
+        for field in ("subtask_id", "task_id"):
+            incoming = getattr(patch, field)
+            existing = metadata.get(field)
+            if incoming and existing and incoming != existing:
+                return True
+        return False
+
     async def _supersede_job(self, job: PrintJob, patch: TelemetryPatch) -> None:
         """Close stale persisted state without emitting a false failure alert."""
         job.transition_to(JobStatus.FAILED, patch.timestamp)
@@ -192,8 +221,12 @@ class StateManager:
         await self.job_repo.save(job)
 
     async def apply_patch(self, patch: TelemetryPatch) -> List[DomainEvent]:
-        """Core pipeline: Merge patch into in-memory state, evaluate lifecycles, and emit events."""
-        async with self._lock:
+        """Core pipeline: Merge patch into in-memory state, evaluate lifecycles, and emit events.
+
+        The lock is scoped per printer: mutation and emission for printer X are
+        strictly ordered, but printer Y's pipeline runs concurrently.
+        """
+        async with self._printer_lock(patch.printer_id):
             printer_id = patch.printer_id
             if printer_id not in self._states:
                 self.register_printer(printer_id)
@@ -203,7 +236,6 @@ class StateManager:
 
             # 1. Connection status transitions
             if patch.online is not None and patch.online != state.online:
-                prev_online = state.online
                 state.online = patch.online
                 event_type = "printer.online" if patch.online else "printer.offline"
                 severity = EventSeverity.INFO if patch.online else EventSeverity.WARNING
@@ -243,7 +275,6 @@ class StateManager:
                 from bambu_monitor.domain.telemetry import map_gcode_state_to_printer_state
                 target_state = map_gcode_state_to_printer_state(patch.gcode_state)
 
-            prev_printer_state = state.state
             if target_state is not None:
                 state.state = target_state
 
@@ -251,10 +282,18 @@ class StateManager:
             active_job = self._active_jobs.get(printer_id)
 
             if active_job and self._job_identity_changed(active_job, patch):
-                await self._supersede_job(active_job, patch)
-                self._active_jobs.pop(printer_id, None)
-                self._last_progress_marker.pop(printer_id, None)
-                active_job = None
+                if self._is_hard_identity_change(active_job, patch):
+                    await self._supersede_job(active_job, patch)
+                    self._active_jobs.pop(printer_id, None)
+                    self._last_progress_marker.pop(printer_id, None)
+                    active_job = None
+                else:
+                    # Name-only change (subtask_name arriving on a later
+                    # report than the first progress delta): rename the job in
+                    # place instead of recording a phantom FAILED job and a
+                    # duplicate of the same physical print.
+                    active_job.filename = patch.subtask_name
+                    await self.job_repo.save(active_job)
 
             # Check if a new print job should start
             if active_job is None:
@@ -625,7 +664,7 @@ class StateManager:
 
     async def reconcile_on_startup(self, printer_id: str, initial_patch: Optional[TelemetryPatch] = None) -> None:
         """Reconcile in-memory state with existing SQLite print jobs on service startup."""
-        async with self._lock:
+        async with self._printer_lock(printer_id):
             db_job = await self.job_repo.get_active_for_printer(printer_id)
             if db_job:
                 # Check if printer is printing and matches this job
@@ -677,6 +716,15 @@ class StateManager:
 
     async def flush_state_to_db(self, printer_id: str) -> None:
         """Throttled periodic persistence of in-memory state snapshot."""
-        state = self._states.get(printer_id)
-        if state:
-            await self.printer_repo.update_current_state(printer_id, state)
+        # Snapshot under the printer's pipeline lock so a concurrent
+        # apply_patch cannot produce a torn state persist.
+        async with self._printer_lock(printer_id):
+            state = self._states.get(printer_id)
+            if not state:
+                return
+            try:
+                snapshot = state.model_copy(deep=True)
+            except Exception:
+                snapshot = state
+        if snapshot:
+            await self.printer_repo.update_current_state(printer_id, snapshot)

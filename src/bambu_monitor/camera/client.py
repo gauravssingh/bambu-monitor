@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 import time
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
@@ -49,7 +48,7 @@ class CameraClientProtocol(Protocol):
 
 class CameraClient:
     """Transport-agnostic camera client for capturing frames from an RTSP stream.
-    
+
     All FFmpeg subprocess details, stream probing compromises, and socket timeouts
     are strictly encapsulated within this client.
     """
@@ -85,7 +84,7 @@ class CameraClient:
 
     async def capture(self, timeout: Optional[float] = None) -> bytes:
         """Capture a single JPEG snapshot directly from the RTSP stream into memory.
-        
+
         Guarantees:
         1. Async subprocess non-blocking execution.
         2. Output piped directly via stdout (zero filesystem writes).
@@ -158,7 +157,7 @@ class CameraClient:
         if process.returncode != 0:
             err_raw = stderr.decode(errors="replace").strip() if stderr else ""
             err_msg = sanitize_rtsp_url(err_raw) or f"FFmpeg exited with error code {process.returncode}"
-            
+
             # Categorize connection failures
             err_lower = err_msg.lower()
             if any(term in err_lower for term in ("connection refused", "route to host", "timed out", "unauthorized", "401", "404")):
@@ -221,7 +220,23 @@ class CameraClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await asyncio.wait_for(probe_proc.communicate(), timeout=4.0)
+            try:
+                stdout, _ = await asyncio.wait_for(probe_proc.communicate(), timeout=4.0)
+            except asyncio.TimeoutError:
+                # Optional diagnostics: a probe timeout must not invalidate
+                # connectivity, but the ffprobe process must be reaped or a
+                # flaky camera leaks one zombie per health() call.
+                if probe_proc.returncode is None:
+                    try:
+                        probe_proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await probe_proc.wait()
+                    except Exception:
+                        pass
+                logger.debug("ffprobe stream diagnostics timed out for %s", self.config.printer_id)
+                return health
             if probe_proc.returncode == 0 and stdout:
                 data = json.loads(stdout.decode(errors="replace"))
                 streams = data.get("streams", [])
@@ -273,7 +288,7 @@ class BaseRTSPCamera(CameraClient):
 
 class TapoRTSPCamera(BaseRTSPCamera):
     """TP-Link Tapo RTSP camera client.
-    
+
     Supports standard Tapo stream identifiers:
     - stream1: Primary high-definition stream (1080p / 2K)
     - stream2: Substream standard-definition stream (360p)

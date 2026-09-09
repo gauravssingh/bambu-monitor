@@ -21,13 +21,10 @@ outbox (pending)
 """
 
 import asyncio
-import json
 from datetime import datetime, timedelta, timezone
 import pytest
 from httpx import AsyncClient
 
-from bambu_monitor.domain.alerts import AlertStatus
-from bambu_monitor.domain.events import OutboxStatus
 
 
 @pytest.mark.asyncio

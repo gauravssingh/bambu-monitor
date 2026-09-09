@@ -1,9 +1,7 @@
 """Unit tests for TimelapseSession, Pause, Manifest, and TimelapseStorage filesystem layout."""
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
-import pytest
 
 from bambu_monitor.timelapse.models import (
     TimelapsePause,

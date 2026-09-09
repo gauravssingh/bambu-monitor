@@ -6,7 +6,8 @@ import asyncio
 import json
 import logging
 import ssl
-from typing import Any, Callable, Dict, Optional
+import threading
+from typing import Any, Dict, Optional
 import paho.mqtt.client as mqtt
 
 from bambu_monitor.bambu.credentials import get_access_code
@@ -49,6 +50,9 @@ class BambuMqttClient:
         self._connected = False
         self._stopped = False
         self._client: Optional[mqtt.Client] = None
+        # Pending-pause state is written from the paho network thread and
+        # read-and-cleared on the asyncio loop thread; guard it with a lock.
+        self._pause_state_lock = threading.Lock()
         self._awaiting_pause_detail = False
         self._pending_pause_patch: Optional[TelemetryPatch] = None
 
@@ -97,6 +101,28 @@ class BambuMqttClient:
         client.on_message = self._on_message
         return client
 
+    def _submit_coroutine(self, coro) -> None:
+        """Schedule a coroutine on the event loop from the paho network thread.
+
+        run_coroutine_threadsafe's returned Future is otherwise discarded, so
+        an exception inside apply_patch would only ever surface as "Future
+        exception was never retrieved" GC noise instead of a real log line.
+        """
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        future.add_done_callback(self._log_future_exception)
+
+    def _log_future_exception(self, future: Any) -> None:
+        if future.cancelled():
+            return
+        exc = future.exception()
+        if exc is not None:
+            logger.error(
+                "Unhandled exception applying telemetry patch for %s: %s",
+                self.printer_id,
+                exc,
+                exc_info=exc,
+            )
+
     def _on_connect(self, client, userdata, flags, rc, *extra_args):
         rc_val = rc.value if hasattr(rc, "value") else rc
         if rc_val == 0:
@@ -106,10 +132,7 @@ class BambuMqttClient:
             # Mark online in state manager
             if self.state_manager:
                 online_patch = TelemetryPatch(printer_id=self.printer_id, online=True)
-                asyncio.run_coroutine_threadsafe(
-                    self.state_manager.apply_patch(online_patch),
-                    self.loop,
-                )
+                self._submit_coroutine(self.state_manager.apply_patch(online_patch))
 
             # 1. Subscribe to report topic
             report_topic = get_report_topic(self.serial_number)
@@ -128,10 +151,7 @@ class BambuMqttClient:
         if self.state_manager and not self._stopped:
             # Mark offline in state manager
             offline_patch = TelemetryPatch(printer_id=self.printer_id, online=False)
-            asyncio.run_coroutine_threadsafe(
-                self.state_manager.apply_patch(offline_patch),
-                self.loop,
-            )
+            self._submit_coroutine(self.state_manager.apply_patch(offline_patch))
 
     def _on_message(self, client, userdata, msg):
         try:
@@ -149,37 +169,51 @@ class BambuMqttClient:
             # before emitting a generic pause so the authoritative HMS/external
             # spool evidence can produce one accurate runout event.
             if is_pause and patch.filament_runout is None and not is_full_status:
-                self._pending_pause_patch = patch
-                if not self._awaiting_pause_detail:
-                    self._awaiting_pause_detail = True
+                with self._pause_state_lock:
+                    self._pending_pause_patch = patch
+                    if not self._awaiting_pause_detail:
+                        self._awaiting_pause_detail = True
+                        need_pushall = True
+                    else:
+                        need_pushall = False
+                if need_pushall:
                     self.send_pushall()
                     self.loop.call_soon_threadsafe(
                         lambda: self.loop.call_later(2.5, self._flush_pending_pause)
                     )
                 return
 
-            if is_pause and self._awaiting_pause_detail:
-                self._awaiting_pause_detail = False
-                self._pending_pause_patch = None
-            elif not is_pause:
-                self._awaiting_pause_detail = False
-                self._pending_pause_patch = None
+            # Only a message carrying authoritative print status (a
+            # gcode_state) may cancel a pending pause. Bambu ACKs, AMS pushes,
+            # and module deltas arrive on the report topic without gcode_state;
+            # clearing on those defeats the debounce.
+            is_authoritative = bool(patch.gcode_state)
+            if is_authoritative or is_pause:
+                with self._pause_state_lock:
+                    self._awaiting_pause_detail = False
+                    self._pending_pause_patch = None
 
             self._submit_patch(patch)
         except Exception as exc:
-            logger.debug("Error parsing MQTT payload for %s: %s", self.printer_id, exc)
+            # A parse failure must be visible: a dropped patch can suppress
+            # online state and safety events (e.g. filament runout).
+            logger.warning(
+                "Error parsing MQTT payload for %s: %s", self.printer_id, exc
+            )
 
     def _submit_patch(self, patch: TelemetryPatch) -> None:
         if self.state_manager:
-            asyncio.run_coroutine_threadsafe(self.state_manager.apply_patch(patch), self.loop)
+            self._submit_coroutine(self.state_manager.apply_patch(patch))
 
     def _flush_pending_pause(self) -> None:
         """Apply a generic pause only when a full-status report never arrived."""
-        if self._awaiting_pause_detail and self._pending_pause_patch:
+        with self._pause_state_lock:
+            if not (self._awaiting_pause_detail and self._pending_pause_patch):
+                return
             patch = self._pending_pause_patch
             self._awaiting_pause_detail = False
             self._pending_pause_patch = None
-            self._submit_patch(patch)
+        self._submit_patch(patch)
 
     def send_command(self, payload: Dict[str, Any]) -> bool:
         """Publish a command to device/{serial}/request."""
@@ -196,38 +230,52 @@ class BambuMqttClient:
         return self.send_command(create_pushall_payload())
 
     def update_host(self, new_ip: str) -> None:
-        """Update printer IP address if changed by DHCP and reconnect."""
+        """Update printer IP address if changed by DHCP and reconnect.
+
+        The paho client binds its host at connect time and never auto-reconnects
+        after an explicit disconnect, so a host change requires a full teardown
+        and recreation of the client against the new address.
+        """
         clean_ip = new_ip.strip()
         if clean_ip and clean_ip != self.host:
             logger.info("Updating IP for printer %s: %s -> %s", self.printer_id, self.host, clean_ip)
             self.host = clean_ip
-            if self._client and self._connected:
-                self._client.disconnect()
+            # paho reconnects to the host stored on its own client object, and
+            # never reconnects at all after an explicit disconnect(); recreate
+            # the client so the new IP actually takes effect.
+            self.stop()
+            self.start()
 
     def start(self) -> None:
-        """Connect and start background network thread."""
+        """Connect and start background network thread.
+
+        Uses connect_async() exclusively: the synchronous connect() variant
+        performs DNS, TCP, and the TLS handshake on the calling (event-loop)
+        thread and can block for the full OS connect timeout when a printer is
+        unreachable. connect_async() hands connection establishment (and retry
+        via reconnect_delay_set) to paho's background network thread.
+        """
         self._stopped = False
         self._client = self._setup_client()
         try:
             logger.info("Connecting to Bambu MQTT %s:%d for %s (access_code length: %d)...", self.host, self.port, self.printer_id, len(self.get_password()))
-            try:
-                self._client.connect(self.host, self.port, keepalive=60)
-                logger.info("TCP/TLS connection to %s:%d established", self.host, self.port)
-            except Exception as conn_err:
-                logger.warning("Direct connect attempt reported: %s; starting async retry loop", conn_err)
-                self._client.connect_async(self.host, self.port, keepalive=60)
+            self._client.connect_async(self.host, self.port, keepalive=60)
             self._client.loop_start()
             logger.info("Started background MQTT network loop for %s", self.printer_id)
         except Exception as exc:
             logger.error("Failed connecting to Bambu MQTT (%s:%d): %s", self.host, self.port, exc)
 
     def stop(self) -> None:
-        """Disconnect and stop background loop."""
+        """Disconnect and stop background loop.
+
+        disconnect() must precede loop_stop() so the MQTT DISCONNECT packet is
+        actually transmitted by the still-running network thread.
+        """
         self._stopped = True
         if self._client:
             try:
-                self._client.loop_stop()
                 self._client.disconnect()
+                self._client.loop_stop()
             except Exception:
                 pass
             self._client = None

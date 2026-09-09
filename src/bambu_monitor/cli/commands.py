@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import getpass
-import json
 import logging
 import os
 from pathlib import Path
@@ -19,11 +18,10 @@ from bambu_monitor.bambu.credentials import (
     delete_access_code,
     get_access_code,
     get_credential_store_info,
-    is_keyring_available,
     store_access_code,
 )
 from bambu_monitor.bambu.discovery import DiscoveredPrinter, discover_printers
-from bambu_monitor.bambu.protocol import BAMBU_DISCOVERY_PORT, BAMBU_LAN_USERNAME, BAMBU_MQTT_PORT
+from bambu_monitor.bambu.protocol import BAMBU_DISCOVERY_PORT, BAMBU_MQTT_PORT
 from bambu_monitor.camera import (
     CameraClient,
     CameraConfig,
@@ -31,6 +29,7 @@ from bambu_monitor.camera import (
     create_camera_client,
     sanitize_rtsp_url,
 )
+from bambu_monitor.config import Settings, load_config
 from bambu_monitor.domain.printer import Printer
 from bambu_monitor.storage.database import Database
 from bambu_monitor.storage.repositories import (
@@ -476,7 +475,6 @@ def _get_running_pid() -> Optional[int]:
 async def cmd_service_start(host: str = "127.0.0.1", port: int = 8000, config_path: Optional[str] = None) -> None:
     """Start Bambu Monitor daemon as a background service."""
     import subprocess
-    import time
     import httpx
 
     existing_pid = _get_running_pid()
@@ -683,14 +681,14 @@ async def cmd_camera_test(
     client = CameraClient(config=p_cfg.camera, printer_id=printer_id)
     print(f"\nTesting RTSP camera for {printer_id} ({client.sanitized_url})...")
     print(f"  FFmpeg:               {p_cfg.camera.ffmpeg_bin}")
-    print(f"  Transport:            TCP")
+    print("  Transport:            TCP")
     print(f"  Probe Size:           {p_cfg.camera.probe_size_bytes} bytes")
     print(f"  Analyze Duration:     {p_cfg.camera.analyze_duration_us} us")
     print(f"  Timeout:              {p_cfg.camera.timeout_seconds}s\n")
 
     diag = await client.test_connection()
     if not diag.get("connected"):
-        print(f"  ✗ Connection / Capture: FAILED")
+        print("  ✗ Connection / Capture: FAILED")
         print(f"  Error: {diag.get('error')}\n")
         return
 

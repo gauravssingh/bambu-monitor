@@ -1,7 +1,6 @@
 """Unit tests for partial telemetry patch merging and state preservation."""
 
 import pytest
-from datetime import datetime, timezone
 from bambu_monitor.domain.printer import PrinterState
 from bambu_monitor.domain.telemetry import TelemetryPatch
 
@@ -43,6 +42,68 @@ def test_a1_mini_external_spool_runout_from_captured_live_shape():
     )
     assert patch.filament_runout is True
     assert patch.filament_runout_details["source"] == "hms.a1_mini_external_runout"
+
+
+def test_hex_print_error_and_string_typed_fields_are_tolerated():
+    """A1 Mini firmware sends print_error as a hex string (0x07ff8011).
+
+    A bare int() raised on it and discarded the whole patch — including the
+    runout signal — before it ever reached the state manager.
+    """
+    patch = TelemetryPatch.from_raw(
+        "test-a1",
+        {
+            "print": {
+                "gcode_state": "PAUSE",
+                "print_error": "0x07ff8011",
+                "hms": [{"code": "0x00020001", "attr": "0x12ff2000"}],
+                "mc_percent": "42.0",
+                "layer_num": "12",
+                "nozzle_temper": "215.5",
+                "bed_temper": "60",
+                "chamber_temper": "not-a-number",
+                "mc_remaining_time": "120",
+            }
+        },
+    )
+    assert patch.error_code == 0x07FF8011
+    assert patch.filament_runout is True
+    assert patch.progress == 42
+    assert patch.layer == 12
+    assert patch.nozzle_temperature == 215.5
+    assert patch.bed_temperature == 60.0
+    assert patch.chamber_temperature is None  # unparseable -> None, not crash
+    assert patch.remaining_seconds == 7200  # 120 minutes
+
+
+def test_malformed_numeric_fields_never_raise():
+    """One malformed field must never discard the whole telemetry patch."""
+    patch = TelemetryPatch.from_raw(
+        "test-a1",
+        {
+            "print": {
+                "gcode_state": "RUNNING",
+                "mc_percent": "bogus",
+                "layer_num": None,
+                "nozzle_temper": "hot",
+                "mc_remaining_time": "soon",
+            }
+        },
+    )
+    # gcode_state and state derivation survive the bad fields
+    assert patch.gcode_state == "RUNNING"
+    assert patch.progress is None
+    assert patch.layer is None
+    assert patch.nozzle_temperature is None
+    assert patch.remaining_seconds is None
+
+
+def test_very_long_print_remaining_time_stays_minutes():
+    """10000+ minutes is a real multi-day print, not seconds."""
+    patch = TelemetryPatch.from_raw(
+        "test-a1", {"print": {"mc_remaining_time": 15000}}
+    )
+    assert patch.remaining_seconds == 15000 * 60
 
 
 @pytest.mark.asyncio

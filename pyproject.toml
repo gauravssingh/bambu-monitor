@@ -31,6 +31,7 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "ruff>=0.5.0",
 ]
 
 [project.scripts]
@@ -44,3 +45,16 @@ minversion = "8.0"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = [".venv", "data", "src/bambu_monitor.egg-info"]
+
+[tool.ruff.lint]
+# E/F are correctness-first: syntax errors, undefined names, unused imports,
+# f-string issues, mutable defaults. Keep the initial set conservative.
+select = ["E", "F", "W"]
+ignore = [
+    "E501", # line length handled by formatter; legacy code has long lines
+]

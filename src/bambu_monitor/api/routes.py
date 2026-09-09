@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import hmac
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,6 +37,8 @@ from bambu_monitor.storage.repositories import (
     TimelapseRepository,
 )
 from bambu_monitor.timelapse import TelemetryCorrelator, TimelapseManager, TimelapseStorage
+
+logger = logging.getLogger(__name__)
 
 def get_state_manager(request: Request) -> StateManager:
     return request.app.state.state_manager
@@ -82,13 +86,29 @@ async def require_api_access(request: Request) -> None:
     configured_token = settings.application.api_token
     presented_token = request.headers.get("X-API-Key", "")
     if configured_token:
-        if hmac.compare_digest(presented_token, configured_token):
+        if presented_token and hmac.compare_digest(presented_token.encode(), configured_token.encode()):
             return
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
 
-    client_host = request.client.host if request.client else None
-    if settings.application.allow_unauthenticated_loopback and client_host in {None, "127.0.0.1", "::1", "testclient"}:
-        return
+    client = request.client
+    client_host = client.host if client else None
+    # A missing client address is an anomaly (e.g. an unusual proxy setup),
+    # not an authorization — deny it rather than defaulting to allow.
+    if not client_host:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Local access only")
+
+    if settings.application.allow_unauthenticated_loopback and client_host in {"127.0.0.1", "::1"}:
+        # DNS-rebinding defense: a remote page rebinding to 127.0.0.1 still
+        # presents a non-loopback Host header, which browsers will not spoof.
+        host_header = (request.headers.get("host") or "").strip().lower()
+        if host_header.startswith("["):
+            hostname = host_header.split("]", 1)[0].lstrip("[")
+        elif ":" in host_header:
+            hostname = host_header.rsplit(":", 1)[0]
+        else:
+            hostname = host_header
+        if hostname in {"127.0.0.1", "::1", "localhost"}:
+            return
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Local access only")
 
 
@@ -250,8 +270,12 @@ async def stream_events(
     request: Request,
     limit: Optional[int] = Query(default=None, ge=1),
     state_manager: StateManager = Depends(get_state_manager),
+    printer_repo: PrinterRepository = Depends(get_printer_repo),
 ) -> StreamingResponse:
     """Stream live domain events for a printer via SSE."""
+    if not await printer_repo.get(printer_id):
+        raise HTTPException(status_code=404, detail=f"Printer '{printer_id}' not found")
+
     async def event_generator():
         count = 0
         try:
@@ -263,8 +287,11 @@ async def stream_events(
                 if limit is not None and count >= limit:
                     break
         except (asyncio.CancelledError, GeneratorExit):
-            pass
+            # Client disconnect / server shutdown: propagate so Starlette can
+            # finalize the response instead of swallowing cancellation.
+            raise
         except Exception:
+            logger.exception("SSE stream error for printer '%s'", printer_id)
             return
 
     return StreamingResponse(
@@ -417,20 +444,21 @@ async def view_timelapse_gallery(
 ) -> HTMLResponse:
     """Render a responsive HTML card gallery for all timelapses recorded for a printer."""
     sessions = await timelapse_repo.list_sessions_for_printer(printer_id, limit=50)
+    esc = html.escape  # All interpolated strings are either URL-derived or printer-reported
 
     cards_html = ""
     for s in sessions:
-        view_url = f"/api/v1/printers/{printer_id}/timelapses/{s.id}/view"
-        download_url = f"/api/v1/printers/{printer_id}/timelapses/{s.id}/video"
+        view_url = f"/api/v1/printers/{esc(printer_id)}/timelapses/{esc(s.id)}/view"
+        download_url = f"/api/v1/printers/{esc(printer_id)}/timelapses/{esc(s.id)}/video"
         status_color = "#10b981" if s.status.value == "completed" else ("#f59e0b" if s.status.value in ("capturing", "paused") else "#ef4444")
         cards_html += f"""
         <div class="card">
           <div class="card-header">
-            <div style="font-weight: 600; font-size: 0.95rem; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">{s.id}</div>
-            <span class="badge" style="background-color: {status_color}22; color: {status_color}; border: 1px solid {status_color}55;">{s.status.value}</span>
+            <div style="font-weight: 600; font-size: 0.95rem; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">{esc(s.id)}</div>
+            <span class="badge" style="background-color: {status_color}22; color: {status_color}; border: 1px solid {status_color}55;">{esc(s.status.value)}</span>
           </div>
           <div class="card-content">
-            <div class="card-detail"><span>Print Job:</span> <strong>{s.print_job_id}</strong></div>
+            <div class="card-detail"><span>Print Job:</span> <strong>{esc(str(s.print_job_id))}</strong></div>
             <div class="card-detail"><span>Started:</span> {s.started_at.strftime('%Y-%m-%d %H:%M')}</div>
             <div class="card-detail"><span>Frames:</span> {s.frame_count:,} ({s.video_fps} FPS)</div>
           </div>
@@ -444,12 +472,12 @@ async def view_timelapse_gallery(
     if not cards_html:
         cards_html = '<div style="grid-column: 1/-1; text-align: center; padding: 3rem; color: #94a3b8;">No timelapses recorded yet for this printer.</div>'
 
-    html = f"""<!DOCTYPE html>
+    page_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Timelapse Gallery — {printer_id} | Bambu Monitor</title>
+  <title>Timelapse Gallery &mdash; {html.escape(printer_id)} | Bambu Monitor</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ background-color: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; padding: 2rem 1rem; }}
@@ -474,7 +502,7 @@ async def view_timelapse_gallery(
     <header>
       <div>
         <h1 style="font-size: 1.75rem; font-weight: 700;">Timelapse Gallery</h1>
-        <p style="color: #94a3b8; font-size: 0.875rem;">Printer: <strong>{printer_id}</strong> &bull; {len(sessions)} recorded sessions</p>
+        <p style="color: #94a3b8; font-size: 0.875rem;">Printer: <strong>{html.escape(printer_id)}</strong> &bull; {len(sessions)} recorded sessions</p>
       </div>
       <a href="/api/v1/printers" class="btn">&larr; API Status</a>
     </header>
@@ -486,7 +514,7 @@ async def view_timelapse_gallery(
 </body>
 </html>
 """
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=page_html)
 
 
 @router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}")
@@ -772,8 +800,8 @@ async def view_timelapse_html(
     if not session or session.printer_id != printer_id:
         raise HTTPException(status_code=404, detail=f"Timelapse session '{timelapse_id}' not found")
 
-    video_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/video"
-    gallery_url = f"/api/v1/printers/{printer_id}/timelapses/gallery"
+    video_url = f"/api/v1/printers/{html.escape(printer_id)}/timelapses/{html.escape(timelapse_id)}/video"
+    gallery_url = f"/api/v1/printers/{html.escape(printer_id)}/timelapses/gallery"
     corr_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/correlation"
     meta_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/metadata"
 
@@ -786,7 +814,9 @@ async def view_timelapse_html(
         events = [e for e in events if e.timestamp <= session.completed_at]
 
     report = TelemetryCorrelator.correlate(session=session, frames_metadata=frames_metadata, events=events)
-    report_json = json.dumps(report.model_dump(mode="json"))
+    # json.dumps does not escape '</script>'; a printer-supplied filename could
+    # break out of the script tag, so neutralize closing-tag sequences.
+    report_json = json.dumps(report.model_dump(mode="json")).replace("</", "<\\/")
 
     # Anomalies badges HTML
     anomalies_html = ""
@@ -798,7 +828,7 @@ async def view_timelapse_html(
             badge_items.append(
                 f'<button type="button" class="anomaly-btn" style="border-color: {color}; color: {color};" '
                 f'onclick="seekTo({a.video_time_start})">'
-                f'<strong>[{t_str}] Frame {a.start_frame}:</strong> {a.description}'
+                f'<strong>[{t_str}] Frame {a.start_frame}:</strong> {html.escape(str(a.description))}'
                 f'</button>'
             )
         anomalies_html = f"""
@@ -837,21 +867,19 @@ async def view_timelapse_html(
     # Thermal stats
     noz = report.thermal_summary.nozzle
     noz_str = f"{noz.min}°C – {noz.max}°C (avg {noz.avg}°C)" if noz else "N/A"
-    noz_target_str = f"{noz.target}°C" if noz and noz.target else "N/A"
 
     bed = report.thermal_summary.bed
     bed_str = f"{bed.min}°C – {bed.max}°C (avg {bed.avg}°C)" if bed else "N/A"
-    bed_target_str = f"{bed.target}°C" if bed and bed.target else "N/A"
 
     stability_val = report.thermal_summary.stability_score
     stab_color = "#10b981" if stability_val >= 90 else ("#f59e0b" if stability_val >= 75 else "#ef4444")
 
-    html = f"""<!DOCTYPE html>
+    page_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Timelapse & Telemetry — {session.id} | Bambu Monitor</title>
+  <title>Timelapse &amp; Telemetry — {html.escape(session.id)} | Bambu Monitor</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ background-color: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.5; padding: 2rem 1rem; }}
@@ -889,7 +917,7 @@ async def view_timelapse_html(
     <header>
       <div>
         <h1 style="font-size: 1.5rem; font-weight: 700;">Print Timelapse & Telemetry</h1>
-        <p style="color: #94a3b8; font-size: 0.875rem;">Printer: <strong>{printer_id}</strong> &bull; Job: {session.print_job_id}</p>
+        <p style="color: #94a3b8; font-size: 0.875rem;">Printer: <strong>{html.escape(printer_id)}</strong> &bull; Job: {html.escape(str(session.print_job_id))}</p>
       </div>
       <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
         <a href="{gallery_url}" class="btn">&larr; Gallery</a>
@@ -937,10 +965,10 @@ async def view_timelapse_html(
       <div class="card-body">
         <div class="title-row">
           <div>
-            <h2 style="font-size: 1.125rem; font-weight: 600;">{session.id}</h2>
+            <h2 style="font-size: 1.125rem; font-weight: 600;">{html.escape(session.id)}</h2>
             <p style="font-size: 0.8rem; color: #64748b;">Started: {session.started_at.strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
           </div>
-          <span class="badge">{session.status.value}</span>
+          <span class="badge">{html.escape(session.status.value)}</span>
         </div>
 
         {anomalies_html}
@@ -1086,7 +1114,7 @@ async def view_timelapse_html(
           hudBedTarget.textContent = pt.bed_target != null ? pt.bed_target : '--';
           hudLayer.textContent = pt.layer != null ? `Layer ${{pt.layer}}` : '--';
           hudProgress.textContent = pt.progress != null ? `${{pt.progress}}%` : '--';
-          
+
           // Speed
           const spdNames = {{1: '100% Standard', 2: '50% Silent', 3: '124% Sport', 4: '166% Ludicrous'}};
           hudSpeed.textContent = pt.speed_percent != null ? `${{pt.speed_percent}}%` : (spdNames[pt.speed_level] || '--');
@@ -1125,6 +1153,6 @@ async def view_timelapse_html(
 </body>
 </html>
 """
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=page_html)
 
 

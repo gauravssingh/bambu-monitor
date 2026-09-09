@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -30,11 +31,16 @@ def sanitize_filename(filename: str) -> str:
 
 
 def generate_job_id(printer_id: str, filename: str, started_at: datetime) -> str:
-    """Generate deterministic job ID: job_{printer_id}_{sanitized_filename}_{epoch}."""
+    """Generate a unique job ID: job_{printer_id}_{sanitized_filename}_{epoch}_{uuid}.
+
+    A uuid fragment is appended because two prints of the same file started
+    within the same wall-clock second must not collide (the epoch alone is
+    only second-precise).
+    """
     clean_printer = re.sub(r"[^\w]+", "_", printer_id).strip("_")
     clean_file = sanitize_filename(filename)
     epoch = int(started_at.timestamp())
-    return f"job_{clean_printer}_{clean_file}_{epoch}"
+    return f"job_{clean_printer}_{clean_file}_{epoch}_{uuid.uuid4().hex[:8]}"
 
 
 class PrintJob(BaseModel):

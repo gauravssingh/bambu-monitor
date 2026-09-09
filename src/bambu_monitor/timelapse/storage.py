@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -12,6 +14,10 @@ from typing import List, Optional
 from bambu_monitor.timelapse.models import TimelapseManifest, TimelapseSession
 
 logger = logging.getLogger(__name__)
+
+# Frame files are strictly 000001.jpg-style; anything else in frames/ is not
+# a capture (e.g. a stray user file) and must never reach the renderer.
+_FRAME_NAME_PATTERN = re.compile(r"^\d{6}\.jpg$")
 
 
 class TimelapseStorage:
@@ -27,10 +33,13 @@ class TimelapseStorage:
         started_at: datetime,
     ) -> Path:
         """Construct canonical directory: <base_dir>/<printer_id>/YYYY/MM/DD/<session_id>/."""
+        # printer_id can originate from config or printer-reported data; never
+        # let traversal characters escape the base directory.
+        safe_printer_id = re.sub(r"[^\w-]+", "_", printer_id).strip("_") or "unknown"
         year = started_at.strftime("%Y")
         month = started_at.strftime("%m")
         day = started_at.strftime("%d")
-        session_dir = self.base_dir / printer_id / year / month / day / session_id
+        session_dir = self.base_dir / safe_printer_id / year / month / day / session_id
         return session_dir
 
     def ensure_session_dirs(self, session_dir: Path) -> tuple[Path, Path]:
@@ -62,7 +71,11 @@ class TimelapseStorage:
         if not frames_dir.is_dir():
             return []
         frames = sorted(
-            [f for f in frames_dir.iterdir() if f.is_file() and f.name.endswith(".jpg") and not f.name.startswith(".")],
+            [
+                f
+                for f in frames_dir.iterdir()
+                if f.is_file() and _FRAME_NAME_PATTERN.match(f.name)
+            ],
             key=lambda p: p.name,
         )
         return frames
@@ -84,6 +97,10 @@ class TimelapseStorage:
 
         tmp_file.replace(manifest_file)
         return manifest_file
+
+    async def save_manifest_async(self, session: TimelapseSession, session_dir: Optional[Path] = None) -> Path:
+        """save_manifest off the event loop (fsync can block for tens of ms)."""
+        return await asyncio.to_thread(self.save_manifest, session, session_dir)
 
     def load_manifest(self, session_dir: Path | str) -> Optional[TimelapseManifest]:
         """Load manifest.json from a session directory if present."""

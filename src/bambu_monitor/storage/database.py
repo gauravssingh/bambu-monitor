@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Any
 import aiosqlite
 
 logger = logging.getLogger(__name__)
@@ -153,6 +153,27 @@ class Database:
                 logger.info("SQLite initialized with journal_mode: %s", journal_mode)
 
             await conn.executescript(INIT_SCHEMA_SQL)
+
+            # Migration: enforce outbox delivery idempotency. Deduplicate any
+            # pre-existing rows first (keeping the earliest), then add the
+            # unique index that backstops INSERT ... ON CONFLICT DO NOTHING.
+            try:
+                await conn.execute(
+                    """
+                    DELETE FROM outbox WHERE id NOT IN (
+                        SELECT MIN(id) FROM outbox GROUP BY event_id, destination
+                    )
+                    """
+                )
+                await conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_event_destination
+                    ON outbox(event_id, destination)
+                    """
+                )
+            except Exception as exc:
+                logger.error("Outbox idempotency migration failed: %s", exc)
+
             await conn.commit()
         finally:
             await conn.close()

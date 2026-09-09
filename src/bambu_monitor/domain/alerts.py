@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
+import uuid
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 
@@ -45,7 +46,9 @@ class Alert(BaseModel):
         created_at: Optional[datetime] = None,
     ) -> Alert:
         now = created_at or utc_now()
-        alert_id = f"alt_{printer_id}_{alert_type.replace('.', '_')}_{int(now.timestamp())}"
+        # uuid fragment: two same-type alerts within one wall-clock second
+        # must not share an ID.
+        alert_id = f"alt_{printer_id}_{alert_type.replace('.', '_')}_{int(now.timestamp())}_{uuid.uuid4().hex[:8]}"
         return cls(
             id=alert_id,
             printer_id=printer_id,

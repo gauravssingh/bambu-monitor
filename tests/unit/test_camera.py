@@ -21,9 +21,9 @@ FAKE_JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x
 
 # 1. Security & Sanitization
 def test_sanitize_rtsp_url():
-    raw = "rtsp://admin:supersecret123@192.168.68.100:554/stream1"
+    raw = "rtsp://admin:supersecret123@192.168.1.100:554/stream1"
     sanitized = sanitize_rtsp_url(raw)
-    assert sanitized == "rtsp://admin:***@192.168.68.100:554/stream1"
+    assert sanitized == "rtsp://admin:***@192.168.1.100:554/stream1"
     assert "supersecret123" not in sanitized
 
     # Empty user
@@ -42,6 +42,24 @@ def test_sanitize_rtsp_url():
     sanitized_log = sanitize_rtsp_url(log)
     assert "user:***@" in sanitized_log
     assert "pass99" not in sanitized_log
+
+    # Password containing '/' (previously truncated netloc parsing and leaked)
+    raw_slash_pw = "rtsp://admin:pa/ss@192.168.1.100:554/stream1"
+    sanitized_slash = sanitize_rtsp_url(raw_slash_pw)
+    assert sanitized_slash == "rtsp://admin:***@192.168.1.100:554/stream1"
+    assert "pa/ss" not in sanitized_slash
+
+    # Password containing ':' (previously partially leaked the prefix)
+    raw_colon_pw = "rtsp://admin:pa:ss@192.168.1.100:554/stream1"
+    sanitized_colon = sanitize_rtsp_url(raw_colon_pw)
+    assert sanitized_colon == "rtsp://admin:***@192.168.1.100:554/stream1"
+    assert "pa:ss" not in sanitized_colon
+
+    # Password containing '@'
+    raw_at_pw = "rtsp://admin:p@ss@192.168.1.100:554/stream1"
+    sanitized_at = sanitize_rtsp_url(raw_at_pw)
+    assert sanitized_at == "rtsp://admin:***@192.168.1.100:554/stream1"
+    assert "p@ss" not in sanitized_at
 
 
 def test_camera_exceptions_sanitization():

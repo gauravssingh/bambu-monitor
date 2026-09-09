@@ -7,7 +7,7 @@ from bambu_monitor.camera.security import sanitize_rtsp_url
 
 class CameraError(Exception):
     """Base exception for all camera-related errors.
-    
+
     Guarantees that error messages have any RTSP credentials masked.
     """
     def __init__(self, message: str) -> None:

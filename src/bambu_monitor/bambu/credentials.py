@@ -21,7 +21,7 @@ LOCAL_CREDS_FILE = Path("./data/.credentials")
 
 def _get_encryption_key() -> bytes:
     """Resolve encryption key for headless fallback store.
-    
+
     Threat Model & Security Boundary:
     1. If BAMBU_ENCRYPTION_KEY or BAMBU_CREDENTIAL_KEY is provided in the environment,
        a 32-byte Fernet key is derived from it. This allows secret separation in headless

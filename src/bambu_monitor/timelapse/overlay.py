@@ -7,13 +7,19 @@ showing real-time hotend/bed temperatures, progress, layers, speeds, and anomaly
 from __future__ import annotations
 
 import io
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 from PIL import Image, ImageDraw, ImageFont
 
 
+@lru_cache(maxsize=32)
 def _load_scaled_font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
-    """Load a scalable TrueType font with cross-platform fallback hierarchy."""
+    """Load a scalable TrueType font with cross-platform fallback hierarchy.
+
+    Cached by size: rendering thousands of frames must not re-scan font
+    candidates and re-open TTF files per frame.
+    """
     font_candidates = [
         "/System/Library/Fonts/Helvetica.ttc",
         "/System/Library/Fonts/Supplemental/Arial.ttf",

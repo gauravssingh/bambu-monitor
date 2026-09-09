@@ -15,8 +15,9 @@ database:
 printers:
   - id: bambu-a1-mini-602482
     model: A1 Mini
-    host: 192.168.68.57
-    serial_number: 0309DA572602482
+    # Real host/serial live in .env (not committed): BAMBU_HOST / BAMBU_SERIAL
+    host: ${BAMBU_HOST:}
+    serial_number: ${BAMBU_SERIAL:}
     port: 8883
     tls: true
     tls_verify: false
@@ -32,7 +33,7 @@ events:
   delivery:
     enabled: true
     endpoint: ${EVENT_ENDPOINT:http://localhost:8644/webhooks/bambu-printer}
-    secret: ${EVENT_SECRET:bambu-secret-8f92a4e7c10b42d591}
+    secret: ${EVENT_SECRET:}
     timeout_seconds: 10
     retry_attempts: 5
     initial_backoff_seconds: 2.0

@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Optional
 
 from bambu_monitor.config import DeliveryConfig
 from bambu_monitor.delivery.webhook import WebhookClient
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class OutboxDeliveryWorker:
     """Delivers pending domain events from the SQLite outbox in per-printer FIFO order.
-    
+
     Guarantees:
     1. At-Least-Once Delivery to webhook destinations.
     2. Per-Printer FIFO: Events for printer A are delivered strictly in order.
@@ -41,9 +41,9 @@ class OutboxDeliveryWorker:
             timeout_seconds=config.timeout_seconds,
             secret=config.secret,
         )
-        self._next_attempt_at: Dict[str, float] = {}
         self._stopped = False
         self._task: Optional[asyncio.Task] = None
+        self._consecutive_loop_failures = 0
 
     def start(self) -> None:
         """Start the background delivery task."""
@@ -68,10 +68,19 @@ class OutboxDeliveryWorker:
         while not self._stopped:
             try:
                 await self.drain_once()
+                self._consecutive_loop_failures = 0
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.debug("Outbox worker loop error: %s", exc)
+                self._consecutive_loop_failures += 1
+                # A persistent loop failure (SQLITE_BUSY, disk full, repo bug)
+                # must be visible: the service would otherwise look healthy
+                # while silently stopping all delivery.
+                (logger.error if self._consecutive_loop_failures >= 3 else logger.warning)(
+                    "Outbox worker loop error (consecutive: %d): %s",
+                    self._consecutive_loop_failures,
+                    exc,
+                )
 
             try:
                 await asyncio.sleep(self.config.poll_interval_seconds)
@@ -80,17 +89,24 @@ class OutboxDeliveryWorker:
 
     async def drain_once(self) -> int:
         """Process one pending message per eligible printer. Returns total delivered count."""
+        # Crash recovery: messages stuck in 'delivering' from a previous run
+        # become claimable again once their delivery timeout has passed.
+        await self.outbox_repo.reclaim_stale_delivering(
+            stale_after_seconds=max(self.config.timeout_seconds * 2, 60.0)
+        )
+
         printers = await self.printer_repo.list_all()
         delivered_count = 0
 
         for p in printers:
-            now = time.time()
-            if p.id in self._next_attempt_at and now < self._next_attempt_at[p.id]:
-                # Printer queue is in backoff cooldown
-                continue
-
             msg = await self.outbox_repo.peek_next_for_printer(p.id)
             if not msg:
+                continue
+
+            # Persisted backoff: eligibility derives from last_attempt_at plus
+            # the backoff tier for the attempts already made, so restarts and
+            # concurrent drains honor the same schedule.
+            if not self._is_eligible(msg):
                 continue
 
             # Event filtering
@@ -112,17 +128,31 @@ class OutboxDeliveryWorker:
 
         return delivered_count
 
+    def _is_eligible(self, msg: OutboxMessage) -> bool:
+        """True when the message's persisted backoff has elapsed."""
+        if msg.attempts <= 0 or msg.last_attempt_at is None:
+            return True
+        backoff = min(
+            self.config.max_backoff_seconds,
+            self.config.initial_backoff_seconds
+            * (self.config.backoff_multiplier ** (msg.attempts - 1)),
+        )
+        eligible_at = msg.last_attempt_at.timestamp() + backoff
+        return time.time() >= eligible_at
+
     async def _deliver_message(self, printer_id: str, msg: OutboxMessage) -> bool:
         destination = msg.destination or self.config.endpoint
         attempts = msg.attempts + 1
         now_dt = datetime.now(timezone.utc)
 
-        await self.outbox_repo.update_status(
-            message_id=msg.id,
-            status=OutboxStatus.DELIVERING,
-            attempts=attempts,
-            last_attempt_at=now_dt,
+        # Atomic claim: only proceed if this worker transitioned the row from
+        # 'pending'. Prevents double delivery if two drains ever race; the
+        # stale-'delivering' reclaim in drain_once preserves crash recovery.
+        claimed = await self.outbox_repo.begin_delivery(
+            message_id=msg.id, attempts=attempts, last_attempt_at=now_dt
         )
+        if not claimed:
+            return False
 
         success, status_code, error_msg = await self.webhook_client.send(
             destination=destination,
@@ -138,7 +168,6 @@ class OutboxDeliveryWorker:
                 last_attempt_at=now_dt,
                 delivered_at=now_dt,
             )
-            self._next_attempt_at.pop(printer_id, None)
             return True
 
         logger.warning(
@@ -162,15 +191,22 @@ class OutboxDeliveryWorker:
                 last_attempt_at=now_dt,
                 error_message=error_msg,
             )
-            # Unblock printer queue so subsequent events can proceed
-            self._next_attempt_at.pop(printer_id, None)
         else:
-            # Exponential backoff retry
+            # Exponential backoff retry. attempts/last_attempt_at are already
+            # persisted by begin_delivery; eligibility is computed from the DB
+            # in _is_eligible, so backoff survives process restarts.
             backoff = min(
                 self.config.max_backoff_seconds,
                 self.config.initial_backoff_seconds * (self.config.backoff_multiplier ** (attempts - 1)),
             )
-            self._next_attempt_at[printer_id] = time.time() + backoff
+            logger.info(
+                "Event %s for printer %s scheduled for retry in %.1fs (attempt %d/%d)",
+                msg.event_id,
+                printer_id,
+                backoff,
+                attempts,
+                self.config.retry_attempts,
+            )
             await self.outbox_repo.update_status(
                 message_id=msg.id,
                 status=OutboxStatus.PENDING,

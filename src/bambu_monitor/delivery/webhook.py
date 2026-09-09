@@ -26,7 +26,7 @@ class WebhookClient:
         headers_override: Optional[Dict[str, str]] = None,
     ) -> Tuple[bool, Optional[int], Optional[str]]:
         """Send JSON payload to webhook destination.
-        
+
         Returns:
             (success: bool, status_code: Optional[int], error_message: Optional[str])
         """

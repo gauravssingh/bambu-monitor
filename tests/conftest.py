@@ -8,7 +8,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from bambu_monitor.api.app import create_app
-from bambu_monitor.config import ApplicationConfig, DatabaseConfig, PrinterConfig, Settings
+from bambu_monitor.config import ApplicationConfig, DatabaseConfig, DeliveryConfig, EventsConfig, PrinterConfig, Settings
 from bambu_monitor.domain.printer import Printer
 from bambu_monitor.state.manager import StateManager
 from bambu_monitor.storage.database import Database
@@ -49,6 +49,10 @@ def test_settings(tmp_path: Path) -> Settings:
             journal_mode="WAL",
             synchronous="NORMAL",
             flush_interval_seconds=60.0,
+        ),
+        events=EventsConfig(
+            # Hermetic: tests must never make real webhook delivery attempts.
+            delivery=DeliveryConfig(enabled=False),
         ),
         printers=[
             PrinterConfig(
@@ -117,8 +121,11 @@ async def state_manager(test_settings: Settings, repositories) -> StateManager:
 @pytest_asyncio.fixture
 async def async_client(test_settings: Settings) -> AsyncGenerator[AsyncClient, None]:
     app = create_app(test_settings)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    # Loopback base_url: ASGITransport presents a loopback client address and
+    # Host header, satisfying require_api_access without any test-only
+    # strings hardcoded in production auth logic.
+    transport = ASGITransport(app=app, client=("127.0.0.1", 123))
+    async with AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as client:
         # Run startup lifespan
         async with app.router.lifespan_context(app):
             yield client

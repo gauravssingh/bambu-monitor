@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from unittest.mock import patch
 
 from bambu_monitor.bambu.credentials import (
     delete_access_code,
@@ -12,8 +10,6 @@ from bambu_monitor.bambu.credentials import (
     get_credential_store_info,
     store_access_code,
     _get_encryption_key,
-    _load_fallback_store,
-    _save_fallback_store,
 )
 
 

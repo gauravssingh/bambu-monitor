@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from bambu_monitor.domain.alerts import Alert, AlertSeverity, AlertStatus
 from bambu_monitor.domain.events import (
@@ -13,7 +13,7 @@ from bambu_monitor.domain.events import (
     OutboxMessage,
     OutboxStatus,
 )
-from bambu_monitor.domain.printer import CurrentPrinterState, Printer, PrinterState
+from bambu_monitor.domain.printer import Printer
 from bambu_monitor.domain.print_job import JobStatus, PrintJob
 
 

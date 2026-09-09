@@ -7,6 +7,47 @@ from bambu_monitor.domain.printer import Printer
 
 
 @pytest.mark.asyncio
+async def test_outbox_rejects_duplicate_event_destination(repositories):
+    """Duplicate outbox rows for the same (event_id, destination) would cause
+    double webhook delivery after an ambiguous retry; the unique index plus
+    ON CONFLICT DO NOTHING must make the second insert a no-op."""
+    outbox_repo = repositories["outbox"]
+    event_repo = repositories["event"]
+    printer_repo = repositories["printer"]
+
+    await printer_repo.save(Printer(id="printer-1", model="A1", serial_number="SNDUP", host="10.0.0.1"))
+    event = DomainEvent.create("printer-1", "print.started", EventSeverity.INFO, {"job": "dup"})
+    await event_repo.save(event)
+
+    first = await outbox_repo.enqueue(event, "http://endpoint")
+    second = await outbox_repo.enqueue(event, "http://endpoint")
+
+    assert first.id is not None
+    # Duplicate insert was suppressed (no new row id assigned)
+    assert second.id is None
+
+    pending = await outbox_repo.list_pending("printer-1")
+    assert len(pending) == 1
+
+
+@pytest.mark.asyncio
+async def test_save_and_enqueue_is_idempotent_on_retry(repositories):
+    """A caller retry after an ambiguous commit must not double-enqueue."""
+    outbox_repo = repositories["outbox"]
+    event_repo = repositories["event"]
+    printer_repo = repositories["printer"]
+
+    await printer_repo.save(Printer(id="printer-2", model="A1 Mini", serial_number="SNATOMIC", host="10.0.0.2"))
+    event = DomainEvent.create("printer-2", "print.completed", EventSeverity.INFO, {"job": "atomic"})
+
+    await event_repo.save_and_enqueue(event, "http://endpoint")
+    await event_repo.save_and_enqueue(event, "http://endpoint")  # simulated retry
+
+    pending = await outbox_repo.list_pending("printer-2")
+    assert len(pending) == 1
+
+
+@pytest.mark.asyncio
 async def test_outbox_per_printer_fifo_and_status(repositories):
     outbox_repo = repositories["outbox"]
     event_repo = repositories["event"]

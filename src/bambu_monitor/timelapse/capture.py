@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
@@ -83,7 +83,13 @@ class FrameCaptureWorker:
             logger.info("FrameCaptureWorker resumed for session %s", self.session.id)
 
     async def stop(self) -> None:
-        """Gracefully stop capture loop."""
+        """Gracefully stop capture loop and wait for any in-flight capture.
+
+        Awaiting the worker lock guarantees that when stop() returns no frame
+        can be written afterwards — otherwise a trigger_capture running on the
+        event-dispatch task could persist frames after the renderer has
+        enumerated the sequence, or regress a COMPLETED session to CAPTURING.
+        """
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
@@ -92,6 +98,8 @@ class FrameCaptureWorker:
             except asyncio.CancelledError:
                 pass
         self._task = None
+        async with self._lock:  # wait for any in-flight _capture_one_frame
+            pass
         try:
             await self.camera.close()
         except Exception as exc:
@@ -124,6 +132,11 @@ class FrameCaptureWorker:
 
             try:
                 frame_bytes = await self.camera.capture()
+                # Re-check under the lock: stop() may have flipped _running
+                # while the multi-second capture was in flight. Discard the
+                # frame rather than persist after the session was finalized.
+                if not self._running or self._paused:
+                    return None
                 self._last_capture_mono = time.monotonic()
 
                 # Camera recovered from a prior outage
@@ -140,10 +153,13 @@ class FrameCaptureWorker:
                         except Exception as cb_exc:
                             logger.debug("Error in on_recovered callback: %s", cb_exc)
 
-                # Persist frame
+                # Persist frame (disk I/O off the event loop: fsync-class
+                # syscalls here run for the lifetime of every session)
                 sequence = self.session.frame_count + 1
                 session_dir = Path(self.session.storage_dir)
-                saved_path = self.storage.save_frame(session_dir, sequence, frame_bytes)
+                saved_path = await asyncio.to_thread(
+                    self.storage.save_frame, session_dir, sequence, frame_bytes
+                )
                 self.session.frame_count = sequence
                 self.session.updated_at = utc_now()
 
@@ -164,7 +180,9 @@ class FrameCaptureWorker:
                         logger.debug("Error querying telemetry provider for frame %d: %s", sequence, telem_exc)
                 if metadata:
                     frame_rec.update(metadata)
-                self.storage.append_frame_metadata(session_dir, frame_rec)
+                await asyncio.to_thread(
+                    self.storage.append_frame_metadata, session_dir, frame_rec
+                )
 
                 logger.debug(
                     "Captured timelapse frame %06d for %s (reason: %s, size: %d bytes)",
@@ -184,7 +202,8 @@ class FrameCaptureWorker:
 
             except asyncio.CancelledError:
                 raise
-            except (CameraError, Exception) as exc:
+            except CameraError as exc:
+                # Camera transport/probe failures: genuine outage handling.
                 self.session.missed_frames += 1
                 if self._camera_online:
                     self._camera_online = False
@@ -203,6 +222,17 @@ class FrameCaptureWorker:
                             await self.on_degraded(err_msg)
                         except Exception as cb_exc:
                             logger.debug("Error in on_degraded callback: %s", cb_exc)
+                return None
+            except Exception as exc:
+                # Non-camera failures (disk full, metadata write errors, bugs
+                # in the telemetry provider) must not be diagnosed as a camera
+                # outage. Count the miss but keep the camera marked online.
+                self.session.missed_frames += 1
+                logger.exception(
+                    "Non-camera failure while persisting frame for session %s: %s",
+                    self.session.id,
+                    exc,
+                )
                 return None
 
     async def _capture_loop(self) -> None:

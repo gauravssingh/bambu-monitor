@@ -1,12 +1,11 @@
 """Integration tests for Timelapse restart recovery and reconciliation."""
 
-import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 import pytest
 
-from bambu_monitor.camera import CameraConfig, CameraRegistry, TapoRTSPCamera
+from bambu_monitor.camera import CameraRegistry, TapoRTSPCamera
 from bambu_monitor.config import Settings, TimelapseConfig
 from bambu_monitor.domain.printer import Printer
 from bambu_monitor.domain.print_job import JobStatus, PrintJob

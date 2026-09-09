@@ -1,13 +1,11 @@
 """Integration tests for timelapse REST endpoints."""
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 import pytest
 from httpx import AsyncClient
 
 from bambu_monitor.timelapse.models import (
-    TimelapseManifest,
     TimelapsePause,
     TimelapseSession,
     TimelapseStatus,

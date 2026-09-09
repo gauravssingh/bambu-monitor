@@ -31,9 +31,22 @@ def map_gcode_state_to_printer_state(gcode_state: str | None) -> PrinterState | 
 
 
 def _as_int(value: Any) -> Optional[int]:
-    """Parse Bambu's mixed decimal/hex numeric fields without raising."""
+    """Parse Bambu's mixed decimal/hex/float-string numeric fields without raising."""
+    text = str(value).strip() if value is not None else ""
     try:
-        return int(str(value), 0)
+        return int(text, 0)
+    except (TypeError, ValueError):
+        pass
+    try:  # tolerate float-strings like "42.0"
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: Any) -> Optional[float]:
+    """Parse device-supplied numeric fields without raising."""
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 
@@ -41,10 +54,10 @@ def _as_int(value: Any) -> Optional[int]:
 def _detect_filament_runout(payload: Dict[str, Any]) -> Tuple[Optional[bool], Dict[str, Any]]:
     """Detect an active filament runout from common Bambu telemetry shapes.
 
-    Bambu firmware versions expose this through slightly different fields. We
-    accept explicit runout flags first, then inspect the active AMS/virtual tray
-    only when its remaining amount is explicitly zero. An arbitrary tray with
-    zero filament is not considered a runout because it may not be selected.
+    Bambu firmware versions expose this through explicit runout flags or HMS
+    fault codes. AMS tray `remain` values are estimates/calibration metadata,
+    not live sensor readings, and must never create or clear a safety alert by
+    themselves — so they are deliberately not inspected here.
     """
     explicit_true = {
         "filament_runout", "filament_out", "filament_empty", "spool_empty",
@@ -118,39 +131,14 @@ def _detect_filament_runout(payload: Dict[str, Any]) -> Tuple[Optional[bool], Di
     if not isinstance(ams, dict):
         return None, {}
 
-    active_id = str(ams.get("tray_now", ""))
-    if active_id in ("", "-1", "None", "254", "255"):
-        # `remain` is configuration metadata for an external spool, not a
-        # reliable live sensor. Never raise an alert from it by itself.
-        return None, {}
-
-    ams_units = ams.get("ams", [])
-    if isinstance(ams_units, dict):
-        ams_units = [ams_units]
-    if isinstance(ams_units, list):
-        for unit in ams_units:
-            if not isinstance(unit, dict):
-                continue
-            trays = unit.get("tray", [])
-            if isinstance(trays, dict):
-                trays = [trays]
-            if not isinstance(trays, list):
-                continue
-            ams_id = int(unit.get("id", 0)) if str(unit.get("id", "0")).isdigit() else 0
-            for tray in trays:
-                tray_id = str(tray.get("id", "")) if isinstance(tray, dict) else ""
-                absolute_tray_id = str(ams_id * 4 + int(tray_id)) if tray_id.isdigit() else tray_id
-                if isinstance(tray, dict) and (tray_id == active_id or absolute_tray_id == active_id):
-                    # Tray `remain` is an estimate/calibration value, so it
-                    # must not create or clear a safety alert without a runout
-                    # sensor/HMS signal.
-                    return None, {}
+    # AMS tray `remain` is an estimate/calibration value, so it must not create
+    # or clear a safety alert without a runout sensor/HMS signal.
     return None, {}
 
 
 class TelemetryPatch(BaseModel):
     """Normalized partial telemetry patch.
-    
+
     Crucial contract: Only fields explicitly provided are updated.
     Missing fields (None) must never overwrite or clear existing state.
     """
@@ -204,12 +192,12 @@ class TelemetryPatch(BaseModel):
             ts = utc_now()
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        
+
         # Extract from nested 'print' object if present (common in Bambu MQTT reports)
         payload = raw.get("print", raw)
 
         filament_runout, filament_runout_details = _detect_filament_runout(payload)
-        
+
         gcode_state = payload.get("gcode_state")
         derived_state = None
         if "state" in payload and payload["state"] is not None:
@@ -226,45 +214,47 @@ class TelemetryPatch(BaseModel):
         # Progress / layers
         progress = payload.get("progress")
         if progress is None and "mc_percent" in payload:
-            progress = int(payload["mc_percent"])
+            progress = _as_int(payload["mc_percent"])
 
         layer = payload.get("layer")
         if layer is None and "layer_num" in payload:
-            layer = int(payload["layer_num"])
+            layer = _as_int(payload["layer_num"])
 
         total_layers = payload.get("total_layers")
         if total_layers is None and "total_layer_num" in payload:
-            total_layers = int(payload["total_layer_num"])
+            total_layers = _as_int(payload["total_layer_num"])
 
         # Remaining seconds
         remaining_seconds = payload.get("remaining_seconds")
         if remaining_seconds is None and "mc_remaining_time" in payload:
-            # Bambu reports mc_remaining_time in minutes; convert to seconds if integer
-            val = payload["mc_remaining_time"]
-            if val is not None:
-                # If value is already large (>1000), it might already be seconds
-                remaining_seconds = int(val) * 60 if int(val) < 10000 else int(val)
+            # Bambu reports mc_remaining_time in minutes. Values >= 100000
+            # minutes (~69 days) cannot be real print durations in minutes,
+            # so they are assumed to already be seconds. Anything below the
+            # threshold — including very large multi-day prints — is minutes.
+            val = _as_int(payload["mc_remaining_time"])
+            if val is not None and val >= 0:
+                remaining_seconds = val * 60 if val < 100_000 else val
 
         # Temperatures
         nozzle_temp = payload.get("nozzle_temperature")
         if nozzle_temp is None and "nozzle_temper" in payload:
-            nozzle_temp = float(payload["nozzle_temper"])
+            nozzle_temp = _as_float(payload["nozzle_temper"])
 
         nozzle_target = payload.get("nozzle_target_temperature")
         if nozzle_target is None and "nozzle_target_temper" in payload:
-            nozzle_target = float(payload["nozzle_target_temper"])
+            nozzle_target = _as_float(payload["nozzle_target_temper"])
 
         bed_temp = payload.get("bed_temperature")
         if bed_temp is None and "bed_temper" in payload:
-            bed_temp = float(payload["bed_temper"])
+            bed_temp = _as_float(payload["bed_temper"])
 
         bed_target = payload.get("bed_target_temperature")
         if bed_target is None and "bed_target_temper" in payload:
-            bed_target = float(payload["bed_target_temper"])
+            bed_target = _as_float(payload["bed_target_temper"])
 
         chamber_temp = payload.get("chamber_temperature")
         if chamber_temp is None and "chamber_temper" in payload:
-            chamber_temp = float(payload["chamber_temper"])
+            chamber_temp = _as_float(payload["chamber_temper"])
 
         # Subtask / filename
         subtask_name = payload.get("subtask_name")
@@ -273,10 +263,10 @@ class TelemetryPatch(BaseModel):
         task_id = str(payload["task_id"]) if payload.get("task_id") is not None else None
         subtask_id = str(payload["subtask_id"]) if payload.get("subtask_id") is not None else None
 
-        # Error codes
+        # Error codes (print_error is frequently a hex string, e.g. "0x07ff8011")
         error_code = payload.get("error_code")
         if error_code is None and "print_error" in payload:
-            error_code = int(payload["print_error"])
+            error_code = _as_int(payload["print_error"])
 
         raw_online = payload.get("online")
         if isinstance(raw_online, bool):

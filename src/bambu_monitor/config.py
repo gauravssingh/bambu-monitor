@@ -172,34 +172,36 @@ class Settings(BaseSettings):
     timelapse: TimelapseConfig = Field(default_factory=TimelapseConfig)
 
     def get_timelapse_config(self, printer_id: str) -> TimelapseConfig:
-        """Resolve effective timelapse configuration for a given printer."""
+        """Resolve effective timelapse configuration for a given printer.
+
+        Only fields the user explicitly set in the per-printer ``timelapse:``
+        section override the global defaults (detected via ``model_fields_set``).
+        Nested sub-models are always constructed by Pydantic and therefore always
+        truthy, so truthiness checks would wrongly discard global settings.
+        """
         printer_cfg = next((p for p in self.printers if p.id == printer_id), None)
         cfg = self.timelapse.model_copy(deep=True)
         if printer_cfg and printer_cfg.timelapse:
             p_tl = printer_cfg.timelapse
-            cfg.enabled = p_tl.enabled
-            if p_tl.storage_dir and p_tl.storage_dir != "./data/timelapses":
+            if "enabled" in p_tl.model_fields_set:
+                cfg.enabled = p_tl.enabled
+            if "storage_dir" in p_tl.model_fields_set:
                 cfg.storage_dir = p_tl.storage_dir
-            if p_tl.camera.url:
-                cfg.camera.url = p_tl.camera.url
-            if p_tl.camera.type:
-                cfg.camera.type = p_tl.camera.type
-            if p_tl.camera.stream:
-                cfg.camera.stream = p_tl.camera.stream
-            if p_tl.capture:
-                cfg.capture = p_tl.capture.model_copy(deep=True)
-            if p_tl.video:
-                cfg.video = p_tl.video.model_copy(deep=True)
-            if hasattr(p_tl, "overlay") and p_tl.overlay:
-                cfg.overlay = p_tl.overlay.model_copy(deep=True)
-            if p_tl.retention:
-                cfg.retention = p_tl.retention.model_copy(deep=True)
+
+            # Field-wise merge of explicitly-set nested keys
+            for section in ("camera", "capture", "video", "overlay", "retention"):
+                p_section: Optional[BaseModel] = getattr(p_tl, section, None)
+                if p_section is None:
+                    continue
+                cfg_section: BaseModel = getattr(cfg, section)
+                for field_name in p_section.model_fields_set:
+                    setattr(cfg_section, field_name, getattr(p_section, field_name))
 
         if not cfg.camera.url and printer_cfg and printer_cfg.camera and printer_cfg.camera.rtsp_url:
             cfg.camera.url = printer_cfg.camera.rtsp_url
-            if hasattr(printer_cfg.camera, "stream") and printer_cfg.camera.stream:
+            if printer_cfg.camera.stream:
                 cfg.camera.stream = printer_cfg.camera.stream
-            if hasattr(printer_cfg.camera, "type") and printer_cfg.camera.type:
+            if printer_cfg.camera.type:
                 cfg.camera.type = printer_cfg.camera.type
         return cfg
 

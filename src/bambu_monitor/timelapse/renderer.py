@@ -7,13 +7,31 @@ import json
 import logging
 import os
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from bambu_monitor.timelapse.models import TimelapseSession, TimelapseStatus, utc_now
+from bambu_monitor.timelapse.models import TimelapseSession, TimelapseStatus
 from bambu_monitor.timelapse.storage import TimelapseStorage
 
 logger = logging.getLogger(__name__)
+
+# Generous ceiling: a long print at low fps still renders in minutes, but a
+# hung ffmpeg must not hold the render semaphore (max_concurrent=1) forever.
+FFMPEG_RENDER_TIMEOUT_SECONDS = 3600.0
+
+
+async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
+    """Kill a subprocess and reap it so no zombie remains."""
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await proc.wait()
+    except Exception:
+        pass
 
 
 class TimelapseRenderError(Exception):
@@ -54,12 +72,20 @@ class TimelapseRenderer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
         except FileNotFoundError:
             logger.warning("ffprobe binary not found at '%s'; container probe skipped", self.ffprobe_bin)
             return {"verified": True, "size_bytes": video_path.stat().st_size}
         except Exception as exc:
             raise TimelapseRenderError(f"Failed to execute ffprobe validation: {exc}")
+
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+        except asyncio.TimeoutError:
+            await _terminate_process(proc)
+            raise TimelapseRenderError("ffprobe validation timed out after 60s")
+        except asyncio.CancelledError:
+            await _terminate_process(proc)
+            raise
 
         if proc.returncode != 0:
             err_msg = stderr.decode(errors="replace").strip() if stderr else f"Exit code {proc.returncode}"
@@ -108,7 +134,7 @@ class TimelapseRenderer:
         burn_overlay: bool = False,
     ) -> Path:
         """Compile session frames into an MP4 video with atomic finalization.
-        
+
         Guarantees:
         1. Validates frame availability (minimum frame count).
         2. Validates frame sequence and fills or reindexes gaps if necessary.
@@ -121,13 +147,13 @@ class TimelapseRenderer:
         session_dir = Path(session.storage_dir)
         frames_dir = session_dir / "frames"
         final_video_path = storage.get_video_path(session_dir)
-        tmp_video_path = session_dir / f".timelapse_{os.getpid()}.tmp.mp4"
+        tmp_video_path = session_dir / f".timelapse_{os.getpid()}_{uuid.uuid4().hex[:8]}.tmp.mp4"
 
         session.transition_to(TimelapseStatus.FINALIZING)
-        storage.save_manifest(session, session_dir)
+        await asyncio.to_thread(storage.save_manifest, session, session_dir)
 
         # 1. Validate frame availability
-        frames = storage.list_frames(session_dir)
+        frames = await asyncio.to_thread(storage.list_frames, session_dir)
         if len(frames) < self.min_frames:
             err_msg = (
                 f"Insufficient frames to render timelapse for session {session.id}: "
@@ -135,7 +161,7 @@ class TimelapseRenderer:
             )
             logger.warning(err_msg)
             session.transition_to(TimelapseStatus.FAILED, error=err_msg)
-            storage.save_manifest(session, session_dir)
+            await asyncio.to_thread(storage.save_manifest, session, session_dir)
             raise TimelapseRenderError(err_msg)
 
         # 2. Ensure frame sequence is valid (handle missed frame gaps and optional HUD overlay)
@@ -144,8 +170,12 @@ class TimelapseRenderer:
 
         try:
             if burn_overlay:
-                input_pattern, start_number, temp_seq_dir = self._prepare_overlay_frame_sequence(
-                    frames, session_dir, storage, session
+                # The overlay pass is synchronous PIL work over every frame;
+                # run it in a worker thread so the event loop (API, MQTT,
+                # SSE) keeps serving during multi-minute renders.
+                input_pattern, start_number, temp_seq_dir = await asyncio.to_thread(
+                    self._prepare_overlay_frame_sequence,
+                    frames, session_dir, storage, session,
                 )
             else:
                 input_pattern, start_number = self._prepare_frame_sequence(frames, session_dir)
@@ -187,7 +217,20 @@ class TimelapseRenderer:
             except Exception as spawn_exc:
                 raise TimelapseRenderError(f"Failed to spawn FFmpeg process: {spawn_exc}")
 
-            _, stderr = await proc.communicate()
+            try:
+                _, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=FFMPEG_RENDER_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                await _terminate_process(proc)
+                raise TimelapseRenderError(
+                    f"FFmpeg rendering timed out after {int(FFMPEG_RENDER_TIMEOUT_SECONDS)}s"
+                )
+            except asyncio.CancelledError:
+                # Shutdown/cancellation must not leave an orphaned ffmpeg or a
+                # half-written tmp video behind.
+                await _terminate_process(proc)
+                raise
 
             if proc.returncode != 0:
                 err_text = stderr.decode(errors="replace").strip() if stderr else f"Exit code {proc.returncode}"
@@ -214,8 +257,19 @@ class TimelapseRenderer:
             # 6. Update session status
             session.video_path = str(final_video_path.resolve())
             session.transition_to(TimelapseStatus.COMPLETED)
-            storage.save_manifest(session, session_dir)
+            await asyncio.to_thread(storage.save_manifest, session, session_dir)
             return final_video_path
+
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException: clean up before propagating.
+            if tmp_video_path.exists():
+                try:
+                    tmp_video_path.unlink()
+                except OSError:
+                    pass
+            if temp_seq_dir and temp_seq_dir.is_dir():
+                shutil.rmtree(temp_seq_dir, ignore_errors=True)
+            raise
 
         except Exception as exc:
             # Clean up temporary video if partially written
@@ -228,7 +282,7 @@ class TimelapseRenderer:
             err_msg = str(exc)
             logger.error("Timelapse video generation failed for session %s: %s", session.id, err_msg)
             session.transition_to(TimelapseStatus.FAILED, error=err_msg)
-            storage.save_manifest(session, session_dir)
+            await asyncio.to_thread(storage.save_manifest, session, session_dir)
             raise TimelapseRenderError(err_msg) from exc
 
         finally:
@@ -251,7 +305,7 @@ class TimelapseRenderer:
             return pattern, first_num
 
         # Gaps detected: re-index with symlinks to ensure FFmpeg parses all frames without stopping
-        temp_dir = session_dir / f".seq_{os.getpid()}"
+        temp_dir = session_dir / f".seq_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         temp_dir.mkdir(parents=True, exist_ok=True)
         for idx, frame in enumerate(frames, start=1):
             link_path = temp_dir / f"{idx:06d}.jpg"
@@ -270,10 +324,15 @@ class TimelapseRenderer:
         storage: TimelapseStorage,
         session: TimelapseSession,
     ) -> tuple[Path, int, Path]:
-        """Burn telemetry HUD overlay onto temporary frame copies for FFmpeg compilation."""
+        """Burn telemetry HUD overlay onto temporary frame copies for FFmpeg compilation.
+
+        Pure CPU + disk (PIL decode/draw/encode per frame); always invoked via
+        asyncio.to_thread from render() so the event loop stays responsive for
+        the duration of a multi-thousand-frame pass.
+        """
         from bambu_monitor.timelapse.overlay import TelemetryOverlayBurner
 
-        temp_dir = session_dir / f".seq_overlay_{os.getpid()}"
+        temp_dir = session_dir / f".seq_overlay_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         temp_dir.mkdir(parents=True, exist_ok=True)
 
         metadata_list = storage.read_frames_metadata(session_dir)

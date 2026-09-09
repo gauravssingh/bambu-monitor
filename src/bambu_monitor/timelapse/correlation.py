@@ -154,7 +154,11 @@ class TelemetryCorrelator:
             frame_num = int(rec.get("frame", idx + 1))
             fname = rec.get("filename", f"{frame_num:06d}.jpg")
             ts = parse_datetime(rec.get("timestamp"))
-            video_sec = round((frame_num - 1) / fps, 3)
+            # Video time derives from the position in the ordered sequence,
+            # matching the renderer, which re-indexes frame files to a
+            # contiguous 1..N sequence whenever capture gaps exist. Using the
+            # raw frame number would drift from the real video position.
+            video_sec = round(idx / fps, 3)
 
             def _clean_float(val: Any) -> Optional[float]:
                 if val is None:
@@ -233,7 +237,7 @@ class TelemetryCorrelator:
                             timestamp_start=drop_start_frame.timestamp,
                             timestamp_end=pt.timestamp,
                             video_time_start=drop_start_frame.video_time_seconds,
-                            video_time_end=round((pt.frame - 2) / fps, 3),
+                            video_time_end=pt.video_time_seconds,
                             description=f"Hotend temperature dropped to {drop_min_temp:.1f}°C ({delta:.1f}°C below target {drop_target:.1f}°C)",
                             metrics={
                                 "min_temp": drop_min_temp,
@@ -309,7 +313,7 @@ class TelemetryCorrelator:
                                 timestamp_start=bed_start_frame.timestamp,
                                 timestamp_end=pt.timestamp,
                                 video_time_start=bed_start_frame.video_time_seconds,
-                                video_time_end=round((pt.frame - 2) / fps, 3),
+                                video_time_end=pt.video_time_seconds,
                                 description=f"Bed temperature dropped to {bed_min_temp:.1f}°C ({delta:.1f}°C below target {bed_target:.1f}°C)",
                                 metrics={
                                     "min_temp": bed_min_temp,

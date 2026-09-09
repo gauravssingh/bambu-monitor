@@ -1,6 +1,5 @@
 """Unit tests for configuration loading and environment interpolation."""
 
-import os
 from pathlib import Path
 from bambu_monitor.config import Settings, _interpolate_env_vars, load_config
 
@@ -63,3 +62,65 @@ detection:
     assert settings.printers[0].id == "printer-1"
     assert settings.printers[1].id == "printer-2"
     assert settings.detection.stall.min_check_seconds == 600.0
+
+
+def test_per_printer_timelapse_overrides_only_explicit_fields(tmp_path: Path):
+    """A per-printer `timelapse:` section containing only some keys must
+    inherit the remaining values from the global timelapse config instead of
+    silently replacing them with model defaults."""
+    from bambu_monitor.config import PrinterConfig, Settings
+
+    settings = Settings(
+        printers=[
+            PrinterConfig(
+                id="p1",
+                serial_number="SNMERGE1",
+                host="10.0.0.1",
+                timelapse={"enabled": False, "video": {"fps": 60}},
+            )
+        ]
+    )
+    settings.timelapse.video.fps = 24
+    settings.timelapse.video.quality = 20
+    settings.timelapse.capture.interval_seconds = 3.0
+
+    cfg = settings.get_timelapse_config("p1")
+    assert cfg.enabled is False                 # explicitly overridden
+    assert cfg.video.fps == 60                  # explicitly overridden
+    assert cfg.video.quality == 20              # inherited from global
+    assert cfg.capture.interval_seconds == 3.0  # inherited from global
+
+
+def test_printer_without_timelapse_section_inherits_global():
+    from bambu_monitor.config import PrinterConfig, Settings
+
+    settings = Settings(
+        printers=[PrinterConfig(id="p2", serial_number="SNMERGE2", host="10.0.0.2")]
+    )
+    settings.timelapse.video.fps = 24
+    cfg = settings.get_timelapse_config("p2")
+    assert cfg.video.fps == 24
+    assert cfg.enabled is True
+
+
+def test_per_printer_section_without_enabled_key_inherits_global_enabled():
+    """A printer `timelapse:` section that sets some field but not `enabled`
+    must inherit the global `enabled`, not silently flip it via a model
+    default (regression: cfg.enabled = p_tl.enabled was unconditional)."""
+    from bambu_monitor.config import PrinterConfig, Settings
+
+    settings = Settings(
+        printers=[
+            PrinterConfig(
+                id="p3",
+                serial_number="SNMERGE3",
+                host="10.0.0.3",
+                timelapse={"video": {"fps": 60}},
+            )
+        ]
+    )
+    settings.timelapse.enabled = False
+
+    cfg = settings.get_timelapse_config("p3")
+    assert cfg.enabled is False  # inherited from global, not the field default (True)
+    assert cfg.video.fps == 60   # explicitly overridden

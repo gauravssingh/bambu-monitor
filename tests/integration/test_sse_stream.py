@@ -1,7 +1,6 @@
 """Integration test for Server-Sent Events (SSE) stream."""
 
 import asyncio
-import json
 import pytest
 from httpx import AsyncClient
 
@@ -40,3 +39,9 @@ async def test_sse_event_stream(async_client: AsyncClient):
     assert "printer.online" in sse_text
     assert "print.started" in sse_text
     assert "benchy.3mf" in sse_text
+
+
+@pytest.mark.asyncio
+async def test_stream_unknown_printer_returns_404(async_client):
+    resp = await async_client.get("/api/v1/printers/does-not-exist/events/stream")
+    assert resp.status_code == 404

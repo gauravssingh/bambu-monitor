@@ -1,18 +1,17 @@
 """Unit tests for TimelapseManager state machine and event handling."""
 
 import asyncio
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 import pytest
 
 from bambu_monitor.camera import CameraConfig, CameraRegistry, TapoRTSPCamera
-from bambu_monitor.config import ApplicationConfig, DatabaseConfig, PrinterConfig, Settings, TimelapseConfig
+from bambu_monitor.config import PrinterConfig, Settings, TimelapseConfig
 from bambu_monitor.domain.events import DomainEvent, EventSeverity
 from bambu_monitor.storage.database import Database
 from bambu_monitor.storage.repositories import TimelapseRepository
 from bambu_monitor.timelapse.manager import TimelapseManager
-from bambu_monitor.timelapse.models import TimelapseSession, TimelapseStatus
+from bambu_monitor.timelapse.models import TimelapseStatus
 from bambu_monitor.timelapse.renderer import TimelapseRenderer
 from bambu_monitor.timelapse.storage import TimelapseStorage
 
@@ -282,6 +281,12 @@ async def test_print_layer_changed_triggers_capture(setup_manager):
             payload={"job_id": "job-layer-test", "layer": 5, "progress": 10.0},
         )
         await m.handle_domain_event(evt_layer)
+
+        # Layer captures are scheduled as background tasks (so the event
+        # pipeline is never blocked by a multi-second RTSP round-trip);
+        # flush the loop to let the pending task run.
+        if m._capture_tasks:
+            await asyncio.gather(*list(m._capture_tasks))
 
         mock_trigger.assert_awaited_once_with(
             reason="layer_change",

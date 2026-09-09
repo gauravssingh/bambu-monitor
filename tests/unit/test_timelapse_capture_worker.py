@@ -242,3 +242,53 @@ async def test_worker_with_telemetry_provider(tmp_path: Path):
     assert rec["printer_state"] == "printing"
 
 
+
+
+@pytest.mark.asyncio
+async def test_stop_discards_in_flight_capture(tmp_path: Path):
+    """A trigger_capture in flight when stop() is called must not persist a
+    frame, advance frame_count, or resurrect the session status."""
+    storage = TimelapseStorage(base_dir=tmp_path)
+    session_dir = tmp_path / "session_stop_race"
+    session = TimelapseSession.create(
+        printer_id="printer-1",
+        print_job_id="job-stop",
+        storage_dir=str(session_dir),
+    )
+
+    release = asyncio.Event()
+
+    async def slow_capture():
+        # Simulate the multi-second RTSP/ffmpeg round-trip
+        await release.wait()
+        return MINI_JPEG
+
+    mock_camera = AsyncMock()
+    mock_camera.capture.side_effect = slow_capture
+
+    # Layer mode: the periodic loop never captures, so the trigger's capture
+    # is the only one that can hold the worker lock.
+    worker = FrameCaptureWorker(session=session, camera=mock_camera, storage=storage, mode="layer")
+    worker.start()
+
+    trigger_task = asyncio.create_task(worker.trigger_capture(reason="layer_change"))
+    await asyncio.sleep(0.02)  # let the capture enter camera.capture()
+    assert trigger_task.done() is False
+
+    # Finalize: stop() sets _running and waits on the worker lock while the
+    # capture is still in flight — exactly the production completion race.
+    stop_task = asyncio.create_task(worker.stop())
+    await asyncio.sleep(0.02)
+    assert stop_task.done() is False  # blocked on the in-flight capture
+
+    # Let the camera return; the capture must be discarded, not persisted.
+    release.set()
+    result = await asyncio.wait_for(trigger_task, timeout=1)
+    await asyncio.wait_for(stop_task, timeout=1)
+
+    assert result is None
+    assert session.frame_count == 0
+    # Status unchanged (CAPTURING at creation) — critically not regressed/
+    # transitioned by the discarded late capture's recovery branch.
+    assert session.status == TimelapseStatus.CAPTURING
+    assert not storage.get_frame_path(session_dir, 1)

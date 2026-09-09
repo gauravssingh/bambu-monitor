@@ -15,7 +15,6 @@ from bambu_monitor.cli.commands import (
 )
 from bambu_monitor.config import (
     ApplicationConfig,
-    CameraConfig,
     DatabaseConfig,
     PrinterConfig,
     Settings,
