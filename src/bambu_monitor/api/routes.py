@@ -459,9 +459,36 @@ def _timelapse_status_color(status_value: str) -> str:
     return "#ef4444"
 
 
-def _timelapse_video_response(session: Any, timelapse_storage: TimelapseStorage, inline: bool) -> FileResponse:
+# Named video variants servable alongside the primary timelapse (path traversal is
+# impossible: fixed dict, values joined to the storage dir without user input).
+_VIDEO_VARIANTS = {
+    "layers": "timelapse_layers_{fps}fps.mp4",  # layer-change-only cut (any fps)
+}
+
+
+def _timelapse_video_response(
+    session: Any,
+    timelapse_storage: TimelapseStorage,
+    inline: bool,
+    variant: Optional[str] = None,
+) -> FileResponse:
     """Resolve and serve a session's rendered MP4, either inline or as a download."""
     video_path = timelapse_storage.get_video_path(session.storage_dir)
+    if variant:
+        # A rendered variant cut (e.g. layer-change-only). fps is fixed per render.
+        requested = None
+        if variant == "layers":
+            for fps in (10, 30, 5, 2):
+                candidate = Path(session.storage_dir) / _VIDEO_VARIANTS["layers"].format(fps=fps)
+                if candidate.is_file():
+                    requested = candidate
+                    break
+        if requested is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Requested video variant '{variant}' is not available for timelapse '{session.id}'",
+            )
+        video_path = requested
     if not video_path.is_file():
         raise HTTPException(
             status_code=404,
@@ -621,24 +648,26 @@ async def get_timelapse(
 async def get_timelapse_video(
     printer_id: str,
     timelapse_id: str,
+    variant: Optional[str] = Query(default=None),
     timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> FileResponse:
     """Download or stream the generated MP4 timelapse video."""
     session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
-    return _timelapse_video_response(session, timelapse_storage, inline=False)
+    return _timelapse_video_response(session, timelapse_storage, inline=False, variant=variant)
 
 
 @router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/stream")
 async def stream_printer_timelapse_video(
     printer_id: str,
     timelapse_id: str,
+    variant: Optional[str] = Query(default=None),
     timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> FileResponse:
     """Stream the generated MP4 timelapse video directly for HTML5 in-browser playback."""
     session = await _get_timelapse_session(timelapse_repo, timelapse_id, printer_id)
-    return _timelapse_video_response(session, timelapse_storage, inline=True)
+    return _timelapse_video_response(session, timelapse_storage, inline=True, variant=variant)
 
 
 # --- Global Timelapse Endpoints ---
@@ -679,23 +708,25 @@ async def get_timelapse_by_id(
 @router.get("/api/v1/timelapses/{timelapse_id}/video")
 async def get_timelapse_video_by_id(
     timelapse_id: str,
+    variant: Optional[str] = Query(default=None),
     timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> FileResponse:
     """Download the generated MP4 timelapse video by session ID."""
     session = await _get_timelapse_session(timelapse_repo, timelapse_id)
-    return _timelapse_video_response(session, timelapse_storage, inline=False)
+    return _timelapse_video_response(session, timelapse_storage, inline=False, variant=variant)
 
 
 @router.get("/api/v1/timelapses/{timelapse_id}/stream")
 async def stream_timelapse_video_by_id(
     timelapse_id: str,
+    variant: Optional[str] = Query(default=None),
     timelapse_repo: TimelapseRepository = Depends(get_timelapse_repo),
     timelapse_storage: TimelapseStorage = Depends(get_timelapse_storage),
 ) -> FileResponse:
     """Stream the generated MP4 timelapse video by session ID for in-browser playback."""
     session = await _get_timelapse_session(timelapse_repo, timelapse_id)
-    return _timelapse_video_response(session, timelapse_storage, inline=True)
+    return _timelapse_video_response(session, timelapse_storage, inline=True, variant=variant)
 
 
 @router.get("/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/frames")
@@ -813,6 +844,12 @@ async def view_timelapse_html(
 
     video_url = f"/api/v1/printers/{html.escape(printer_id)}/timelapses/{html.escape(timelapse_id)}/video"
     gallery_url = f"/api/v1/printers/{html.escape(printer_id)}/timelapses/gallery"
+    # Offer the layer-change-only cut when a variant render exists on disk.
+    layers_variant_url = ""
+    if any((Path(session.storage_dir) / _VIDEO_VARIANTS["layers"].format(fps=fps)).is_file() for fps in (10, 30, 5, 2)):
+        layers_variant_url = (
+            f"<a href=\"{video_url}?variant=layers\" download class=\"btn\">&#128193; Layer-only cut</a>"
+        )
     corr_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/correlation"
     meta_url = f"/api/v1/printers/{printer_id}/timelapses/{timelapse_id}/metadata"
 
@@ -935,6 +972,7 @@ async def view_timelapse_html(
         <a href="{corr_url}" target="_blank" class="btn">&#128269; Correlation JSON</a>
         <a href="{meta_url}" target="_blank" class="btn">&#128196; Frames Dataset</a>
         <a href="{video_url}" download class="btn btn-primary">&darr; Download MP4</a>
+        {layers_variant_url}
       </div>
     </header>
 
