@@ -249,7 +249,7 @@ Base URL: `http://localhost:8000`
 * `GET /api/v1/outbox/status` — Outbox queue counts (`pending`, `delivering`, `delivered`, `failed_dlq`).
 
 ### Printers
-* `GET /api/v1/printers` — List all configured printers.
+* `GET /api/v1/printers` — List all configured printers. (A bare `GET /printers` alias also exists for backward compatibility with pre-`/api/v1` deployments; it is undocumented in the OpenAPI schema and new integrations should use the `/api/v1` form.)
 * `GET /api/v1/printers/{printer_id}` — Get printer details.
 * `GET /api/v1/printers/{printer_id}/status` — Live canonical status:
   ```json
