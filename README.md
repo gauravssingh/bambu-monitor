@@ -2,8 +2,8 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 123 Passed](https://img.shields.io/badge/tests-123%20passed-brightgreen.svg)]()
-[![Architecture: Phase 1--4 Complete](https://img.shields.io/badge/architecture-Phase%201--4%20Complete-blueviolet.svg)]()
+[![Tests: 149 Passed](https://img.shields.io/badge/tests-149%20passed-brightgreen.svg)]()
+[![Architecture: Phase 1--4 + Camera Timelapse Complete](https://img.shields.io/badge/architecture-Phase%201--4%20%2B%20Camera%20Timelapse%20Complete-blueviolet.svg)]()
 [![Database: SQLite WAL](https://img.shields.io/badge/storage-SQLite%20WAL-orange.svg)]()
 
 **Bambu Monitor** is a standalone local service that turns Bambu Lab 3D printers on your local network into a reliable, queryable, event-driven service.
@@ -102,14 +102,14 @@ Searching for Bambu printers on the local network (listening up to 12s for heart
 Found 1 printer:
 
   [1] BBL_A1_Mini (A1 Mini)
-      Serial:  0309DA572602482
-      IP:      192.168.68.57
+      Serial:  00A00EXAMPLE0000
+      IP:      192.168.1.100
       Port:    8883
 
 Select printer [1]: 1
 
 Enter LAN Access Code for A1 Mini (masked): ********
-Testing connection to 192.168.68.57:8883...
+Testing connection to 192.168.1.100:8883...
 ✓ TLS connection established
 ✓ Authentication verified
 
@@ -121,8 +121,8 @@ Testing connection to 192.168.68.57:8883...
 ### Scripted / Automated Onboarding
 ```bash
 bambu-monitor onboard \
-  --serial 0309DA572602482 \
-  --ip 192.168.68.57 \
+  --serial 00A00EXAMPLE0000 \
+  --ip 192.168.1.100 \
   --access-code 12345678 \
   --model "A1 Mini" \
   --name "Lab A1 Mini"
@@ -172,6 +172,8 @@ bambu-monitor
 | `bambu-monitor reconnect <printer_id>` | Forces immediate MQTT reconnect, re-subscription, and state pushall. |
 | `bambu-monitor credentials <printer_id>` | Prompts for and updates stored LAN Access Code. |
 | `bambu-monitor remove <printer_id>` | Unregisters printer and purges credentials from the OS Keyring. |
+| `bambu-monitor camera <test\|snap>` | Tests RTSP camera connectivity or captures a single diagnostic JPEG snapshot. |
+| `bambu-monitor timelapse <status\|list\|camera-test\|generate\|correlate>` | Manages the timelapse subsystem — see [Camera Timelapse Subsystem](#camera-timelapse-subsystem) below. |
 
 ---
 
@@ -190,7 +192,7 @@ events:
   delivery:
     enabled: true
     endpoint: ${EVENT_ENDPOINT:http://localhost:8644/webhooks/bambu-printer}
-    secret: ${EVENT_SECRET:bambu-secret-8f92a4e7c10b42d591}
+    secret: ${EVENT_SECRET:<your-EVENT_SECRET>}
     # Hermes must be able to reach this URL to fetch alert snapshots.
     # public_base_url: ${BAMBU_MONITOR_PUBLIC_URL:http://localhost:8000}
     timeout_seconds: 10
@@ -217,7 +219,7 @@ events:
       "print.started",
       "timelapse.completed"
     ],
-    "secret": "bambu-secret-8f92a4e7c10b42d591",
+    "secret": "<your-EVENT_SECRET>",
     "prompt": "Bambu 3D Printer Event: {event_type}\nPrinter: {source}\nSeverity: {severity}\n\nEvent details:\n{__raw__}\n\nFor alert-like events, download the fresh snapshot from {camera_snapshot_url} and send it to Telegram using MEDIA:/tmp/bambu_alert.jpg.\nFor timelapse.completed events, download the finished MP4 video from {timelapse_video_url} and deliver it to Telegram as MEDIA:/tmp/timelapse.mp4 announcing that the print timelapse video is ready!",
     "deliver": "telegram",
     "deliver_extra": {
@@ -311,6 +313,7 @@ Bambu Monitor includes a production-grade, camera-vendor-agnostic print timelaps
    ```
 
 ### 2. Architecture & Lifecycle State Machine
+* **Configurable Capture Mode** (`timelapse.capture.mode`, default `hybrid`): `layer` captures on every layer-height change, `interval` captures on a fixed timer (`capture.interval_seconds`), and `hybrid` (default) runs both so long inter-layer gaps still produce steady footage.
 * **Lifecycle Driven**: Synchronizes automatically with printer events without polling or custom scripts:
   * `print.started` → Allocates session, creates filesystem directory, launches capture worker.
   * `print.paused` → Halts frame capture, tracks pause timestamps and cumulative paused seconds.
@@ -366,7 +369,7 @@ Open `GET /api/v1/printers/{printer_id}/timelapses/{session_id}/view` in any bro
 The test suite is fully decoupled from physical printer hardware using stored fixtures:
 
 ```bash
-# Run the complete test suite (123 unit and integration tests)
+# Run the complete test suite (149 unit and integration tests)
 pytest -v
 
 # Run system and network diagnostics on your environment
