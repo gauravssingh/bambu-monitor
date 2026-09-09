@@ -72,7 +72,7 @@ timelapse:
     max_concurrent: 1
   overlay:
     # Set to true to burn telemetry HUD banner into video frames; false preserves clean camera frames
-    enabled: false
+    enabled: true
     show_temperatures: true
     show_progress: true
     show_alerts: true

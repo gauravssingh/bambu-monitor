@@ -53,7 +53,7 @@ class TelemetryOverlayBurner:
         show_progress: bool = True,
         show_alerts: bool = True,
     ) -> Image.Image:
-        """Draw a sleek, translucent telemetry HUD bar on top of the image."""
+        """Draw a sleek, translucent telemetry HUD bar on the bottom of the image."""
         img = image.convert("RGBA")
         width, height = img.size
 
@@ -70,10 +70,10 @@ class TelemetryOverlayBurner:
         font = _load_scaled_font(font_size)
         small_font = _load_scaled_font(small_font_size)
 
-        # 1. Background translucent banner (top)
-        draw.rectangle([0, 0, width, hud_height], fill=(15, 23, 42, 220))
+        # 1. Background translucent banner (bottom)
+        draw.rectangle([0, height - hud_height, width, height], fill=(15, 23, 42, 220))
         # Divider line
-        draw.line([0, hud_height, width, hud_height], fill=(51, 65, 85, 255), width=int(1.5 * scale))
+        draw.line([0, height - hud_height, width, height - hud_height], fill=(51, 65, 85, 255), width=int(1.5 * scale))
 
         # Extract telemetry fields
         layer = telemetry.get("layer", 0)
@@ -93,7 +93,7 @@ class TelemetryOverlayBurner:
         if show_progress and progress is not None:
             left_text += f" ({progress:.0f}%)"
 
-        y_pos = int(14 * scale)
+        y_pos = height - hud_height + int(14 * scale)
         draw.text((int(15 * scale), y_pos), left_text, fill=(248, 250, 252, 255), font=font)
 
         # 3. Right side: Hotend & Bed Temperatures
@@ -131,16 +131,16 @@ class TelemetryOverlayBurner:
             temp_color = (248, 113, 113, 255) if is_temp_drop else (56, 189, 248, 255)
             draw.text((right_x, y_pos), right_text, fill=temp_color, font=font)
 
-        # 4. Progress bar line at the bottom of the HUD banner
+        # 4. Progress bar line at the top of the HUD banner
         if show_progress and progress is not None and progress > 0:
             prog_ratio = min(1.0, max(0.0, float(progress) / 100.0))
             bar_w = int(width * prog_ratio)
-            draw.line([0, hud_height - 2, bar_w, hud_height - 2], fill=(37, 99, 235, 255), width=int(3 * scale))
+            draw.line([0, height - hud_height + 2, bar_w, height - hud_height + 2], fill=(37, 99, 235, 255), width=int(3 * scale))
 
         # 5. Anomaly Alert Banner (if thermal drop or alert active)
         if show_alerts and (is_temp_drop or anomalies):
             alert_h = int(24 * scale)
-            alert_y = hud_height + int(4 * scale)
+            alert_y = height - hud_height - alert_h - int(4 * scale)
             alert_text = "[!] THERMAL DROP DETECTED" if is_temp_drop else "[!] PRINTER ANOMALY DETECTED"
             try:
                 abbox = draw.textbbox((0, 0), alert_text, font=small_font)
