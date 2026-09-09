@@ -449,26 +449,103 @@ async def cmd_reconnect(printer_id: str, settings: Optional[Settings] = None) ->
             print("  Check printer power, Wi-Fi connectivity, and LAN Mode settings.")
 
 
-PID_FILE = Path("./data/bambu-monitor.pid")
-LOG_FILE = Path("./data/bambu-monitor.log")
+# Service management ---------------------------------------------------------
+#
+# PID and log files live in a per-user state directory (overridable via the
+# BAMBU_MONITOR_STATE_DIR environment variable) so that `service start` and
+# `service stop` always operate on the same files regardless of the caller's
+# working directory.
+
+STATE_DIR_ENV = "BAMBU_MONITOR_STATE_DIR"
+DAEMON_CMDLINE_MARKER = "bambu_monitor"
+
+
+def _state_dir() -> Path:
+    """Fixed, CWD-independent home for the PID and log files."""
+    override = os.environ.get(STATE_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "bambu-monitor"
+    return Path.home() / ".local" / "state" / "bambu-monitor"
+
+
+def _pid_file() -> Path:
+    return _state_dir() / "bambu-monitor.pid"
+
+
+def _log_file() -> Path:
+    return _state_dir() / "bambu-monitor.log"
 
 
 def _is_pid_alive(pid: int) -> bool:
+    """True if a process with this PID exists.
+
+    EPERM (PermissionError) means the process exists but is owned by another
+    user — that is a *live* process, not a dead one.
+    """
     try:
         os.kill(pid, 0)
         return True
-    except (OSError, ProcessLookupError):
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
+
+
+def _process_cmdline(pid: int) -> Optional[str]:
+    """Best-effort command line of the process owning `pid`, or None."""
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    if proc_cmdline.exists():
+        try:
+            raw = proc_cmdline.read_bytes()
+            return " ".join(part for part in raw.split(b"\0") if part)
+        except OSError:
+            return None
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            timeout=2.0,
+            check=False,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.decode("utf-8", errors="replace").strip()
+    except Exception:
+        pass
+    return None
+
+
+def _pid_is_our_daemon(pid: int) -> Optional[bool]:
+    """Verify the PID still belongs to a Bambu Monitor daemon.
+
+    Guards against PID reuse: after a crash, the OS may hand the recorded PID
+    to an unrelated process, and killing it blindly would hit that process.
+    Returns None when the command line cannot be determined.
+    """
+    cmdline = _process_cmdline(pid)
+    if cmdline is None:
+        return None
+    return DAEMON_CMDLINE_MARKER in cmdline
+
+
+def _read_pid_file() -> Optional[int]:
+    pid_file = _pid_file()
+    if pid_file.exists():
+        try:
+            return int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            pass
+    return None
 
 
 def _get_running_pid() -> Optional[int]:
-    if PID_FILE.exists():
-        try:
-            pid = int(PID_FILE.read_text().strip())
-            if _is_pid_alive(pid):
-                return pid
-        except Exception:
-            pass
+    """PID of a live daemon, or None. PID reuse makes a stale entry read as not running."""
+    pid = _read_pid_file()
+    if pid is not None and _is_pid_alive(pid) and _pid_is_our_daemon(pid) is not False:
+        return pid
     return None
 
 
@@ -483,9 +560,12 @@ async def cmd_service_start(host: str = "127.0.0.1", port: int = 8000, config_pa
         print(f"API available at: http://127.0.0.1:{port}")
         return
 
+    pid_file = _pid_file()
+    log_file = _log_file()
+
     # Ensure log directory exists
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    log_fd = open(LOG_FILE, "a", buffering=1)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_fd = open(log_file, "a", buffering=1)
 
     cmd = [
         sys.executable,
@@ -503,7 +583,11 @@ async def cmd_service_start(host: str = "127.0.0.1", port: int = 8000, config_pa
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
-    PID_FILE.write_text(str(proc.pid))
+    # The child inherited the descriptor; the parent must close its copy.
+    log_fd.close()
+
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(proc.pid))
 
     print("Starting Bambu Monitor daemon...")
     # Wait for HTTP server to become responsive
@@ -524,24 +608,32 @@ async def cmd_service_start(host: str = "127.0.0.1", port: int = 8000, config_pa
     if healthy:
         print(f"✓ Bambu Monitor service started successfully (PID {proc.pid})")
         print(f"✓ HTTP API listening on http://{host}:{port}")
-        print(f"✓ Log output: {LOG_FILE.resolve()}")
+        print(f"✓ Log output: {log_file.resolve()}")
     elif not _is_pid_alive(proc.pid):
         print("✗ Service failed to start. Check logs for details:")
-        if LOG_FILE.exists():
-            print(LOG_FILE.read_text()[-1000:])
+        if log_file.exists():
+            print(log_file.read_text()[-1000:])
     else:
         print(f"✓ Bambu Monitor background process started (PID {proc.pid})")
-        print(f"  Log output: {LOG_FILE.resolve()}")
+        print(f"  Log output: {log_file.resolve()}")
 
 
 async def cmd_service_stop() -> None:
     """Stop running Bambu Monitor daemon."""
     import signal
-    pid = _get_running_pid()
-    if not pid:
+    pid_file = _pid_file()
+    pid = _read_pid_file()
+    if pid is None or not _is_pid_alive(pid):
         print("Bambu Monitor is not running.")
-        if PID_FILE.exists():
-            PID_FILE.unlink(missing_ok=True)
+        pid_file.unlink(missing_ok=True)
+        return
+
+    # Guard against PID reuse: never signal a process we cannot verify is ours.
+    identity = _pid_is_our_daemon(pid)
+    if identity is False:
+        print(f"✗ PID {pid} no longer belongs to Bambu Monitor (PID reuse detected) — refusing to kill it.")
+        print("  The stale PID file has been removed; the real daemon is not running.")
+        pid_file.unlink(missing_ok=True)
         return
 
     print(f"Stopping Bambu Monitor service (PID {pid})...")
@@ -555,12 +647,15 @@ async def cmd_service_stop() -> None:
         if not _is_pid_alive(pid):
             break
     else:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except Exception:
-            pass
+        if identity is None:
+            print("! Could not verify the process identity — skipping SIGKILL (kill manually if needed).")
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
 
-    PID_FILE.unlink(missing_ok=True)
+    pid_file.unlink(missing_ok=True)
     print("✓ Bambu Monitor service stopped.")
 
 
@@ -599,11 +694,12 @@ async def cmd_service_restart(host: str = "127.0.0.1", port: int = 8000, config_
 
 def cmd_service_logs(lines: int = 50) -> None:
     """Display recent logs from the background daemon."""
-    if not LOG_FILE.exists():
-        print(f"No log file found at {LOG_FILE}")
+    log_file = _log_file()
+    if not log_file.exists():
+        print(f"No log file found at {log_file}")
         return
 
-    content = LOG_FILE.read_text(errors="ignore").splitlines()
+    content = log_file.read_text(errors="ignore").splitlines()
     recent = content[-lines:] if len(content) > lines else content
     for line in recent:
         print(line)

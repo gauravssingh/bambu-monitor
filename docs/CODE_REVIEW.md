@@ -980,3 +980,23 @@ Additional fixes applied this pass, prompted by the review:
 | 4 | Delivery-guarantee wording implied exactly-once | `README.md`: reworded to state at-least-once + consumer-side `event_id` idempotency | — |
 
 151/151 tests pass; `ruff check src tests` clean.
+
+---
+
+# Fix log — batch 5 (2025-09-09): PID lifecycle (§1.7)
+
+The last code-only item left open from the original review. CI remains open (blocked on the `workflow` OAuth scope — see batch 4).
+
+| # | Finding | Fix | Tests |
+|---|---|---|---|
+| 1 | `_is_pid_alive` misread EPERM as "dead" — a daemon owned by another user looked stopped, inviting a second daemon / orphaned real one | `cli/commands.py`: `PermissionError` from `os.kill(pid, 0)` now returns `True` (live); only `ProcessLookupError` means dead | `test_is_pid_alive_treats_eperm_as_alive` |
+| 2 | `service stop` SIGTERM/SIGKILLed the recorded PID with no identity verification — PID reuse could kill an arbitrary process | New `_pid_is_our_daemon(pid)` checks the process command line (`/proc/<pid>/cmdline` on Linux, `ps -p <pid> -o command=` elsewhere) for the `bambu_monitor` marker before any signal. Stop now: refuses to signal a foreign PID (removes the stale file, kills nothing); if identity is *undeterminable*, sends SIGTERM but skips SIGKILL. `_get_running_pid` also verifies identity, so `service status` no longer reports a reused PID as "Running" | `test_service_stop_refuses_to_kill_reused_pid`, `test_service_stop_skips_sigkill_when_identity_unknown`, `test_service_stop_sigkills_verified_daemon_after_timeout`, `test_service_stop_stops_verified_daemon`, `test_get_running_pid_stale_pid_reuse_reads_as_not_running` |
+| 3 | `PID_FILE`/`LOG_FILE` were CWD-relative (`./data/...`) — start and stop from different directories operated on different files | Both now live in a fixed per-user state dir (`~/Library/Application Support/bambu-monitor` on macOS, `~/.local/state/bambu-monitor` elsewhere), overridable via `BAMBU_MONITOR_STATE_DIR`. Migration note: a daemon started *before* this change recorded its PID in the old CWD-relative location and must be restarted once for the new `stop`/`status` to manage it | `test_state_dir_env_override`, `test_state_dir_default_is_absolute_not_cwd_relative` |
+| 4 | `log_fd` leaked in the parent CLI process after spawning the daemon | Closed explicitly after `Popen` (child inherits its own copy) | — |
+| 5 | Minor from §1.7: `except (OSError, ProcessLookupError)` redundant tuple; stop's bare `except Exception` around SIGKILL | Explicit `ProcessLookupError` / `PermissionError` handling; corrupt/unparseable PID file content is cleaned up by stop | `test_service_stop_cleans_corrupt_pid_file`, `test_service_stop_not_running_removes_stale_pid_file` |
+
+Verified beyond the suite: real `service start --port 8123` → `/health` OK → `service status` shows Running → `service stop` terminates cleanly, no orphaned process; PID/log files resolved to the anchored state dir.
+
+168/168 tests pass; `ruff check src tests` clean.
+
+**Still open:** CI (`.github/workflows/ci.yml` drafted but unpushed — needs a token with the `workflow` scope; batch 4), bounded queue/coalescer for MQTT patch backpressure (§2.5 remainder), plus everything already listed as open in batches 1–2.
