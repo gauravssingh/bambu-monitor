@@ -101,6 +101,7 @@ class TimelinePoint(BaseModel):
     chamber_temp: Optional[float] = None
     speed_level: Optional[int] = None
     speed_percent: Optional[int] = None
+    fan_speed: Optional[int] = None
     state: Optional[str] = None
     reason: Optional[str] = None
     anomaly_ids: List[str] = Field(default_factory=list)
@@ -190,6 +191,7 @@ class TelemetryCorrelator:
                 chamber_temp=_clean_float(rec.get("chamber_temp")),
                 speed_level=_clean_int(rec.get("speed_level")),
                 speed_percent=_clean_int(rec.get("speed_percent")),
+                fan_speed=_clean_int(rec.get("cooling_fan_speed")),
                 state=rec.get("state") or rec.get("printer_state"),
                 reason=rec.get("reason"),
                 anomaly_ids=[],
